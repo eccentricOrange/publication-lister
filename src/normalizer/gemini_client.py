@@ -107,23 +107,29 @@ class GeminiClient:
         if not unresolved_strings:
             return [], []
 
-        # Target max tokens allowed per request based on TPM limit & min delay between requests
-        requests_per_min = 60.0 / self.rate_limiter.min_delay
-        target_tokens_per_req = int(0.85 * (self.rate_limiter.tpm_capacity / requests_per_min))
-        # Hard cap per request (between 6,000 and 35,000 tokens)
-        target_tokens_per_req = max(6000, min(35000, target_tokens_per_req))
+        # Target max tokens allowed per request (safe cap of 8,000 tokens to stay well under 250k TPM)
+        target_tokens_per_req = 8000
 
-        # Sample unresolved strings to find relevant keywords for registry pruning
-        sample = unresolved_strings[:100]
+        # Generic stopwords to exclude from registry matching to avoid matching every entity
+        generic_stopwords = {
+            "university", "college", "institute", "school", "department", "center", "centre", 
+            "laboratory", "lab", "inc", "ltd", "corp", "corporation", "llc", "group", "faculty", 
+            "academy", "technology", "science", "national", "state", "research", "engineering", 
+            "system", "systems", "china", "japan", "usa", "germany", "france", "spain", "italy", 
+            "korea", "canada", "uk", "dept"
+        }
+
+        # Sample unresolved strings for specific entity keywords (ignoring generic stopwords)
+        sample = unresolved_strings[:50]
         keywords = set()
         for s in sample:
             for w in re.findall(r"\w+", s.lower()):
-                if len(w) >= 4:
+                if len(w) >= 4 and w not in generic_stopwords:
                     keywords.add(w)
 
-        # Prune registry summary if it is too large (> 300 entries)
+        # Prune registry summary to at most 100 relevant entries
         pruned_registry = []
-        if len(canonical_registry_summary) <= 300:
+        if len(canonical_registry_summary) <= 100:
             pruned_registry = canonical_registry_summary
         else:
             for e in canonical_registry_summary:
@@ -131,26 +137,30 @@ class GeminiClient:
                 aliases = " ".join(e.get("known_aliases", [])).lower()
                 if any(w in c_name or w in aliases for w in keywords):
                     pruned_registry.append(e)
+                if len(pruned_registry) >= 100:
+                    break
 
-            # Ensure at least top 200 entries are included if keyword matching is sparse
-            if len(pruned_registry) < 200:
+            # Fallback to top 100 entries if keyword matches are sparse
+            if len(pruned_registry) < 50:
                 seen_ids = {e["canonical_id"] for e in pruned_registry}
-                for e in canonical_registry_summary[:200]:
+                for e in canonical_registry_summary[:100]:
                     if e["canonical_id"] not in seen_ids:
                         pruned_registry.append(e)
+                    if len(pruned_registry) >= 100:
+                        break
 
         # Estimate prompt token size (~20 tokens per registry entry + system prompt overhead)
         est_registry_tokens = len(pruned_registry) * 20 + 400
         avail_token_budget = max(2000, target_tokens_per_req - est_registry_tokens)
 
-        # Estimate batch count (~15 tokens per raw string)
-        optimal_count = max(10, min(100, avail_token_budget // 15))
+        # Estimate batch count (~15 tokens per raw string, max 50 strings per batch)
+        optimal_count = max(10, min(50, avail_token_budget // 15))
         batch = unresolved_strings[:optimal_count]
 
         est_total_tokens = est_registry_tokens + len(batch) * 15
         logger.info(
             f"Dynamic Batching: Selected {len(batch)} raw strings with {len(pruned_registry)} canonical registry entries. "
-            f"(Est. Tokens: {est_total_tokens} / Target Cap: {target_tokens_per_req} TPM: {self.rate_limiter.tpm_capacity:.0f})"
+            f"(Est. Tokens: {est_total_tokens} / Target Cap: {target_tokens_per_req} TPM Limit: {self.rate_limiter.tpm_capacity:.0f})"
         )
         return batch, pruned_registry
 
