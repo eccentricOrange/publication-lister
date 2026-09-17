@@ -22,15 +22,15 @@ class ScopusExtractor(BaseExtractor):
         self.api_key = api_key
 
     def extract(self, venue: str, year: int, force: bool = False) -> Dict[str, Any]:
-        venue_upper = venue.upper()
-        if not force and self.is_cached(venue_upper, year):
-            logger.info(f"Raw data for {venue_upper} {year} is cached.")
-            return self.load_cached(venue_upper, year)
-
         if not self.api_key:
             err_msg = "SCOPUS_API_KEY is not set in environment or configuration. Cannot proceed with Scopus extraction."
             logger.error(err_msg, exc_info=True)
             raise ValueError(err_msg)
+
+        venue_upper = venue.upper()
+        if not force and self.is_cached(venue_upper, year):
+            logger.info(f"Raw data for {venue_upper} {year} is cached.")
+            return self.load_cached(venue_upper, year)
 
         logger.info(f"Querying Elsevier Scopus API for venue '{venue_upper}' year {year}")
 
@@ -53,13 +53,17 @@ class ScopusExtractor(BaseExtractor):
                 "count": count_per_page,
             }
 
+            prepared_url = requests.Request("GET", SCOPUS_SEARCH_URL, headers=headers, params=params).prepare().url
+            logger.info(f"Querying Scopus URL: {prepared_url}")
+
             self.enforce_pacing()
 
             try:
                 response = self.session.get(SCOPUS_SEARCH_URL, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
             except Exception as e:
-                logger.error(f"HTTP request to Scopus API failed for {venue_upper} {year}: {e}", exc_info=True)
+                resp_body = response.text if response is not None else "No response body"
+                logger.error(f"HTTP request to Scopus API failed for {venue_upper} {year}: {e}\nFull Response Body:\n{resp_body}", exc_info=True)
                 raise e
 
             if not initial_request_done:

@@ -8,41 +8,43 @@ logger = logging.getLogger(__name__)
 
 class TokenBucketRateLimiter:
     """
-    Thread-safe Token Bucket Rate Limiter.
-    Dynamically initialized from API rate limit query headers on startup.
+    Thread-safe Rate Limiter with strict inter-request pacing.
+    Prevents burst traffic from triggering HTTP 429 rate limit errors.
     """
 
-    def __init__(self, requests_per_minute: float = 15.0):
+    def __init__(self, requests_per_minute: float = 6.0, tokens_per_minute: float = 250000.0):
         self.capacity = max(1.0, float(requests_per_minute))
-        self.fill_rate = self.capacity / 60.0  # tokens per second
-        self.tokens = self.capacity
-        self.last_update = time.monotonic()
+        self.tpm_capacity = max(1000.0, float(tokens_per_minute))
+        self.fill_rate = self.capacity / 60.0
+        self.min_delay = 60.0 / self.capacity  # 10.0s for 6 RPM
+        self.last_request_time = 0.0
         self.lock = threading.Lock()
 
     def update_limit(self, requests_per_minute: float) -> None:
-        """Dynamically updates capacity and fill rate from startup API headers."""
+        """Dynamically updates capacity, fill_rate, and min_delay from API headers."""
+        self.update_limits(requests_per_minute=requests_per_minute)
+
+    def update_limits(self, requests_per_minute: Optional[float] = None, tokens_per_minute: Optional[float] = None) -> None:
+        """Dynamically updates RPM and TPM capacities from API response headers."""
         with self.lock:
-            self.capacity = max(1.0, float(requests_per_minute))
-            self.fill_rate = self.capacity / 60.0
-            self.tokens = min(self.tokens, self.capacity)
-            logger.info(f"Updated TokenBucketRateLimiter rate limit to {self.capacity:.1f} RPM")
+            if requests_per_minute is not None:
+                self.capacity = max(1.0, float(requests_per_minute))
+                self.fill_rate = self.capacity / 60.0
+                self.min_delay = 60.0 / self.capacity
+            if tokens_per_minute is not None:
+                self.tpm_capacity = max(1000.0, float(tokens_per_minute))
+            logger.info(
+                f"Updated TokenBucketRateLimiter rate limits: {self.capacity:.1f} RPM "
+                f"(min_delay={self.min_delay:.2f}s), {self.tpm_capacity:.0f} TPM"
+            )
 
     def acquire(self) -> None:
-        """Blocks until a token is available for consumption."""
-        while True:
-            with self.lock:
-                now = time.monotonic()
-                elapsed = now - self.last_update
-                self.last_update = now
-
-                self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
-
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                else:
-                    needed = 1.0 - self.tokens
-                    wait_time = needed / self.fill_rate
-
-            time.sleep(max(0.05, wait_time))
+        """Blocks until minimum inter-request pacing delay has elapsed."""
+        with self.lock:
+            now = time.monotonic()
+            elapsed = now - self.last_request_time
+            if elapsed < self.min_delay:
+                wait_time = self.min_delay - elapsed
+                time.sleep(wait_time)
+            self.last_request_time = time.monotonic()
 

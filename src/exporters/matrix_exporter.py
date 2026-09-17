@@ -56,6 +56,7 @@ class MatrixExporter:
                 raise FileNotFoundError(err_msg)
 
             try:
+                logger.info(f"Opening normalized data file for matrix reading: {norm_file.resolve()}")
                 with open(norm_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:
@@ -113,6 +114,7 @@ class MatrixExporter:
 
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Opening CSV matrix file for writing: {output_path.resolve()}")
             with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()

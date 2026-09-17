@@ -43,7 +43,7 @@ The goal is to produce a consolidated matrix CSV where:
 
 #### 3. LLM-Based Affiliation Resolution (`src/normalizer/`)
 - When processing raw affiliation strings, look up existing entries against `canonical_organizations.json` first.
-- For unresolved strings or cluster resolution, batch unfamiliar affiliation strings and query the Gemini API (`gemini-2.5-flash-lite` or current Flash-Lite tier).
+- For unresolved strings or cluster resolution, batch unfamiliar affiliation strings and query the Gemini API (`gemini-3.1-flash-lite` or current Flash-Lite tier).
 - **Prompting & Payload:**
   - Send the existing canonical registry alongside the batch of raw author strings.
   - Instruct the model to:

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from src.extractors.openalex import OpenAlexExtractor
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.scopus import ScopusExtractor
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
@@ -47,6 +48,11 @@ class TestNormalizerAndExporter(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_strict_exception_on_missing_api_keys(self):
+        # Verify OpenAlexExtractor raises ValueError when api_key and mailto are empty
+        openalex_ext = OpenAlexExtractor(api_key="", mailto="")
+        with self.assertRaises(ValueError):
+            openalex_ext.extract("ICRA", 2024)
+
         # Verify IEEEExtractor raises ValueError when key is empty
         extractor = IEEEExtractor(api_key="")
         with self.assertRaises(ValueError):
@@ -125,6 +131,27 @@ class TestNormalizerAndExporter(unittest.TestCase):
             self.assertEqual(row_mit["2023"], "1")
             self.assertEqual(row_mit["2024"], "0")
             self.assertEqual(row_mit["total"], "1")
+
+    def test_pause_and_resume_state(self):
+        extractor = IEEEExtractor(api_key="TEST_KEY", output_dir=self.raw_dir)
+        
+        # Save partial state (paused after page 1, next_page=201, completed=False)
+        batch_1 = [{"paper_id": f"P_{i}", "title": f"Paper {i}", "raw_affiliations": ["Stanford"]} for i in range(1, 201)]
+        extractor.append_raw_batch("ICRA", 2022, batch_1, completed=False, next_page=201)
+        
+        self.assertFalse(extractor.is_cached("ICRA", 2022))
+        
+        # Verify file on disk contains pause state
+        raw_file = extractor.get_raw_file_path("ICRA", 2022)
+        with open(raw_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            self.assertEqual(data["total_papers"], 200)
+            self.assertEqual(data["next_page"], 201)
+            self.assertFalse(data["completed"])
+
+        # Mark completed
+        extractor.append_raw_batch("ICRA", 2022, [], completed=True)
+        self.assertTrue(extractor.is_cached("ICRA", 2022))
 
 
 if __name__ == "__main__":

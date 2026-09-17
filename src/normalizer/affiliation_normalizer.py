@@ -38,7 +38,7 @@ class AffiliationNormalizer:
         self,
         venue: str,
         year: int,
-        batch_size: int = 20,
+        batch_size: int = 50,
         force: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -48,14 +48,20 @@ class AffiliationNormalizer:
         venue_upper = venue.upper()
         norm_path = self.get_normalized_file_path(venue_upper, year)
 
+        # Check if fully completed normalized dataset exists
+        cached_resolved_mappings: Dict[str, str] = {}
         if not force and norm_path.exists() and norm_path.stat().st_size > 0:
-            logger.info(f"Normalized dataset for {venue_upper} {year} already exists at {norm_path}")
             try:
+                logger.info(f"Opening normalized file for reading cached data: {norm_path.resolve()}")
                 with open(norm_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    norm_data = json.load(f)
+                if norm_data.get("completed", False):
+                    logger.info(f"Normalized dataset for {venue_upper} {year} is fully completed at {norm_path}")
+                    return norm_data
+                cached_resolved_mappings = norm_data.get("resolved_mappings", {})
+                logger.info(f"Resuming partial normalization for {venue_upper} {year} ({len(cached_resolved_mappings)} strings previously resolved)")
             except Exception as e:
-                logger.error(f"Failed loading existing normalized dataset at {norm_path}", exc_info=True)
-                raise e
+                logger.warning(f"Could not read existing normalized dataset at {norm_path}: {e}")
 
         # Load raw file
         raw_file = self.raw_dir / venue_upper / f"{venue_upper}_{year}.json"
@@ -65,6 +71,7 @@ class AffiliationNormalizer:
             raise FileNotFoundError(err_msg)
 
         try:
+            logger.info(f"Opening raw dataset file for reading: {raw_file.resolve()}")
             with open(raw_file, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
         except Exception as e:
@@ -81,22 +88,75 @@ class AffiliationNormalizer:
                 if aff and aff.strip():
                     unique_raw_strings.add(aff.strip())
 
-        # Step 1: Resolve locally using existing registry
-        string_to_canonical_id: Dict[str, str] = {}
+        # Step 1: Resolve locally using existing registry and cached mappings
+        string_to_canonical_id: Dict[str, str] = dict(cached_resolved_mappings)
         unresolved_strings: List[str] = []
 
         for raw_str in sorted(list(unique_raw_strings)):
+            if raw_str in string_to_canonical_id:
+                continue
             match = self.registry.find_by_string(raw_str)
             if match:
                 string_to_canonical_id[raw_str] = match["canonical_id"]
             else:
                 unresolved_strings.append(raw_str)
 
-        logger.info(f"Local registry matched {len(string_to_canonical_id)} strings. {len(unresolved_strings)} unresolved strings remaining.")
+        logger.info(f"Local registry & cache matched {len(string_to_canonical_id)} strings. {len(unresolved_strings)} unresolved strings remaining.")
+
+        # Helper to save normalized checkpoint
+        def _save_checkpoint(completed: bool = False, normalized_papers_list: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+            artifact = {
+                "venue": venue_upper,
+                "year": year,
+                "completed": completed,
+                "total_papers": len(normalized_papers_list) if normalized_papers_list is not None else len(raw_papers),
+                "resolved_mappings": string_to_canonical_id,
+                "papers": normalized_papers_list or [],
+            }
+            try:
+                logger.info(f"Opening normalized dataset file for writing: {norm_path.resolve()}")
+                with open(norm_path, "w", encoding="utf-8") as f:
+                    json.dump(artifact, f, indent=2, ensure_ascii=False)
+            except Exception as exc:
+                logger.warning(f"Failed saving normalization checkpoint to {norm_path}: {exc}")
+            
+            # Also update raw paper file with step status
+            try:
+                steps = raw_data.get("steps", {})
+                steps["extraction"] = {"completed": raw_data.get("completed", True), "total_papers": len(raw_papers)}
+                steps["normalization"] = {"completed": completed, "normalized_file": str(norm_path.resolve())}
+                raw_data["steps"] = steps
+                logger.info(f"Opening raw dataset file for updating step status: {raw_file.resolve()}")
+                with open(raw_file, "w", encoding="utf-8") as f:
+                    json.dump(raw_data, f, indent=2, ensure_ascii=False)
+            except Exception as exc:
+                logger.warning(f"Failed updating step status in raw file {raw_file}: {exc}")
+            
+            return artifact
 
         # Step 2: Batch unresolved strings and query Gemini API
-        if unresolved_strings:
-            registry_summary = [
+        while unresolved_strings:
+            # Re-check remaining unresolved strings against updated registry
+            still_unresolved = []
+            newly_matched_count = 0
+            for raw_str in unresolved_strings:
+                if raw_str in string_to_canonical_id:
+                    continue
+                match = self.registry.find_by_string(raw_str)
+                if match:
+                    string_to_canonical_id[raw_str] = match["canonical_id"]
+                    newly_matched_count += 1
+                else:
+                    still_unresolved.append(raw_str)
+            
+            if newly_matched_count > 0:
+                logger.info(f"Re-checking registry matched {newly_matched_count} additional strings locally. {len(still_unresolved)} remaining.")
+
+            unresolved_strings = still_unresolved
+            if not unresolved_strings:
+                break
+
+            full_registry_summary = [
                 {
                     "canonical_id": e["canonical_id"],
                     "canonical_name": e["canonical_name"],
@@ -106,30 +166,54 @@ class AffiliationNormalizer:
                 for e in self.registry.entries
             ]
 
-            for i in range(0, len(unresolved_strings), batch_size):
-                batch = unresolved_strings[i : i + batch_size]
-                logger.info(f"Querying Gemini API for batch of {len(batch)} unresolved strings ({i+1}-{i+len(batch)}/{len(unresolved_strings)})")
-                
-                try:
-                    resolutions = self.gemini_client.normalize_batch(batch, registry_summary)
-                except Exception as e:
-                    logger.error(f"Failed batch normalization with Gemini API: {e}", exc_info=True)
-                    raise e
+            batch, registry_summary = self.gemini_client.calculate_dynamic_batch(
+                unresolved_strings,
+                full_registry_summary,
+            )
 
-                for raw_str, res in resolutions.items():
+            logger.info(f"Querying Gemini API for dynamic batch of {len(batch)} unresolved strings ({len(string_to_canonical_id)} resolved locally so far, {len(unresolved_strings)} remaining)")
+
+            try:
+                resolutions = self.gemini_client.normalize_batch(batch, registry_summary)
+            except Exception as e:
+                logger.error(f"Failed batch normalization with Gemini API: {e}", exc_info=True)
+                _save_checkpoint(completed=False)
+                raise e
+
+            for raw_str in batch:
+                res = resolutions.get(raw_str) or resolutions.get(raw_str.strip())
+                if not res:
+                    norm_k = raw_str.strip().lower()
+                    for k, v in resolutions.items():
+                        if str(k).strip().lower() == norm_k:
+                            res = v
+                            break
+
+                if res and isinstance(res, dict):
                     c_id = res.get("canonical_id")
                     if c_id and self.registry.find_by_id(c_id):
                         string_to_canonical_id[raw_str] = c_id
-                    else:
-                        # Register new proposed organization
-                        c_name = res.get("canonical_name") or raw_str
-                        e_type = res.get("entity_type") or "UNI"
-                        new_entry = self.registry.register_organization(
-                            canonical_name=c_name,
-                            entity_type=e_type,
-                            known_aliases=[raw_str],
-                        )
-                        string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+                        continue
+
+                    c_name = res.get("canonical_name") or raw_str.strip()
+                    e_type = res.get("entity_type") or "UNI"
+                    new_entry = self.registry.register_organization(
+                        canonical_name=c_name,
+                        entity_type=e_type,
+                        known_aliases=[raw_str.strip()],
+                    )
+                    string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+                else:
+                    # Fallback if LLM omitted key: register raw string directly as canonical
+                    new_entry = self.registry.register_organization(
+                        canonical_name=raw_str.strip(),
+                        entity_type="UNI",
+                        known_aliases=[raw_str.strip()],
+                    )
+                    string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+            
+            # Checkpoint after each batch
+            _save_checkpoint(completed=False)
 
         # Step 3: Build normalized paper list with WITHIN-PAPER DEDUPLICATION
         normalized_papers: List[Dict[str, Any]] = []
@@ -151,19 +235,7 @@ class AffiliationNormalizer:
                 "canonical_ids": sorted(list(canonical_ids_set)),
             })
 
-        norm_artifact = {
-            "venue": venue_upper,
-            "year": year,
-            "total_papers": len(normalized_papers),
-            "papers": normalized_papers,
-        }
-
-        try:
-            with open(norm_path, "w", encoding="utf-8") as f:
-                json.dump(norm_artifact, f, indent=2, ensure_ascii=False)
-            logger.info(f"Successfully saved normalized dataset to {norm_path}")
-            return norm_artifact
-        except Exception as e:
-            logger.error(f"Failed saving normalized dataset to {norm_path}", exc_info=True)
-            raise e
+        final_artifact = _save_checkpoint(completed=True, normalized_papers_list=normalized_papers)
+        logger.info(f"Successfully completed and saved normalized dataset to {norm_path}")
+        return final_artifact
 

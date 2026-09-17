@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from src.logger import setup_logging
+from src.extractors.openalex import OpenAlexExtractor
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.scopus import ScopusExtractor
 from src.extractors.conference_schedule import ConferenceScheduleExtractor
@@ -24,7 +25,10 @@ def run_extract(args: argparse.Namespace) -> None:
     logger.info(f"Executing EXTRACT subcommand for venue={venue}, years={start_year}..{end_year}, source={source}")
 
     for year in range(start_year, end_year + 1):
-        if source == "ieee":
+        if source == "openalex":
+            extractor = OpenAlexExtractor()
+            extractor.extract(venue, year, force=force)
+        elif source == "ieee":
             extractor = IEEEExtractor()
             extractor.extract(venue, year, force=force)
         elif source == "scopus":
@@ -37,15 +41,25 @@ def run_extract(args: argparse.Namespace) -> None:
             )
             extractor.extract(venue, year, force=force)
         elif source == "all":
-            # Attempt extractors in order
             extracted = False
+            # 1. Try OpenAlex first (free, open, high rate limit)
             try:
-                extractor = IEEEExtractor()
+                extractor = OpenAlexExtractor()
                 extractor.extract(venue, year, force=force)
                 extracted = True
             except Exception as e:
-                logger.warning(f"IEEE extraction failed for {venue} {year}: {e}. Trying Scopus...")
+                logger.warning(f"OpenAlex extraction failed for {venue} {year}: {e}. Trying IEEE Xplore...")
 
+            # 2. Try IEEE Xplore
+            if not extracted:
+                try:
+                    extractor = IEEEExtractor()
+                    extractor.extract(venue, year, force=force)
+                    extracted = True
+                except Exception as e:
+                    logger.warning(f"IEEE extraction failed for {venue} {year}: {e}. Trying Scopus...")
+
+            # 3. Try Scopus
             if not extracted:
                 try:
                     extractor = ScopusExtractor()
@@ -54,6 +68,7 @@ def run_extract(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logger.warning(f"Scopus extraction failed for {venue} {year}: {e}. Trying schedule parser...")
 
+            # 4. Try Schedule Parser
             if not extracted and (args.schedule_file or args.schedule_url):
                 extractor = ConferenceScheduleExtractor(
                     schedule_url=args.schedule_url,
@@ -85,7 +100,8 @@ def run_export(args: argparse.Namespace) -> None:
     venue = args.venue.upper()
     start_year = args.year_start
     end_year = args.year_end
-    output_path = Path(args.output) if args.output else None
+    output_val = getattr(args, "output", None)
+    output_path = Path(output_val) if output_val else None
 
     logger.info(f"Executing EXPORT subcommand for venue={venue}, years={start_year}..{end_year}")
 
@@ -117,11 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--venue", "-v_name", type=str, required=True, help="Venue name (e.g., ICRA, IROS, CVPR)")
         subparser.add_argument("--year-start", type=int, required=True, help="Start publication year (e.g., 2017)")
         subparser.add_argument("--year-end", type=int, required=True, help="End publication year (e.g., 2026)")
+        subparser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 1. Extract subcommand
     p_extract = subparsers.add_parser("extract", help="Extract raw paper & affiliation data")
     add_common_args(p_extract)
-    p_extract.add_argument("--source", type=str, choices=["ieee", "scopus", "schedule", "all"], default="ieee", help="Data extractor source")
+    p_extract.add_argument("--source", type=str, choices=["ieee", "openalex", "scopus", "schedule", "all"], default="ieee", help="Data extractor source")
     p_extract.add_argument("--schedule-file", type=str, default=None, help="Path to local HTML schedule file")
     p_extract.add_argument("--schedule-url", type=str, default=None, help="URL to online conference schedule")
     p_extract.add_argument("--force", action="store_true", help="Force re-extraction ignoring cache")
@@ -139,9 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 4. Pipeline subcommand
     p_pipe = subparsers.add_parser("pipeline", help="Run full extraction, normalization, and export pipeline")
     add_common_args(p_pipe)
-    p_pipe.add_argument("--source", type=str, choices=["ieee", "scopus", "schedule", "all"], default="ieee", help="Data extractor source")
+    p_pipe.add_argument("--source", type=str, choices=["ieee", "openalex", "scopus", "schedule", "all"], default="ieee", help="Data extractor source")
     p_pipe.add_argument("--schedule-file", type=str, default=None, help="Path to local HTML schedule file")
     p_pipe.add_argument("--schedule-url", type=str, default=None, help="URL to online conference schedule")
+    p_pipe.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
     p_pipe.add_argument("--force", action="store_true", help="Force re-run of all pipeline steps")
 
     return parser
@@ -171,4 +189,3 @@ def cli() -> None:
 
 if __name__ == "__main__":
     cli()
-

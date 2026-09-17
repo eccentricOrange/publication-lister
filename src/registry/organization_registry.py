@@ -66,6 +66,7 @@ class OrganizationRegistry:
             return
 
         try:
+            logger.info(f"Opening canonical organization registry file for reading: {self.registry_path.resolve()}")
             with open(self.registry_path, "r", encoding="utf-8") as f:
                 self.entries = json.load(f)
             self._rebuild_lookup_map()
@@ -78,6 +79,7 @@ class OrganizationRegistry:
         """Saves current registry entries to JSON file."""
         try:
             self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Opening canonical organization registry file for writing: {self.registry_path.resolve()}")
             with open(self.registry_path, "w", encoding="utf-8") as f:
                 json.dump(self.entries, f, indent=2, ensure_ascii=False)
             logger.info(f"Saved {len(self.entries)} canonical entries to {self.registry_path}")
@@ -103,12 +105,11 @@ class OrganizationRegistry:
     def find_by_string(self, raw_string: str) -> Optional[Dict[str, Any]]:
         """
         Looks up a raw affiliation string in canonical registry.
-        Checks canonical_id first, then canonical name and known aliases.
+        Checks canonical_id first, then canonical name and known aliases via exact & longest substring match.
         """
         if not raw_string:
             return None
 
-        # Direct canonical_id check
         clean_str = raw_string.strip()
         if clean_str.upper() in self._lookup_map:
             return self._lookup_map[clean_str.upper()]
@@ -117,14 +118,25 @@ class OrganizationRegistry:
         if norm_key in self._lookup_map:
             return self._lookup_map[norm_key]
 
-        # Try partial substring match against exact alias strings
+        # Stopwords to ignore for standalone substring matching
+        generic_stopwords = {"university", "college", "institute", "school", "department", "center", "centre", "laboratory", "lab", "inc", "ltd", "corp", "corporation", "llc", "group", "faculty", "academy"}
+
+        # Try matching known canonical names & aliases as substrings inside norm_key
+        best_match = None
+        longest_match_len = 0
+
         for entry in self.entries:
             for alias in [entry["canonical_name"]] + entry.get("known_aliases", []):
                 alias_norm = self._normalize_key(alias)
-                if alias_norm and (alias_norm in norm_key or norm_key in alias_norm):
-                    return entry
+                if not alias_norm or alias_norm in generic_stopwords:
+                    continue
+                # Require alias length >= 4 to avoid short acronym false positives
+                if len(alias_norm) >= 4 and alias_norm in norm_key:
+                    if len(alias_norm) > longest_match_len:
+                        best_match = entry
+                        longest_match_len = len(alias_norm)
 
-        return None
+        return best_match
 
     def find_by_id(self, canonical_id: str) -> Optional[Dict[str, Any]]:
         """Finds entry by exact canonical ID."""

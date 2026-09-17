@@ -85,16 +85,21 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
+# OpenAlex API Key (for authenticated API queries)
+# Register at: https://openalex.org/
+OPENALEX_API_KEY=your_openalex_api_key_here
+
+# OpenAlex Contact Email (optional fallback)
+OPENALEX_MAILTO=your_email@example.com
+
 # Gemini API Key (for LLM normalization)
 # Register at: https://aistudio.google.com/
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# IEEE Xplore API Key (for IEEE proceedings e.g. ICRA, IROS, RA-L)
-# Register at: https://developer.ieee.org/
+# IEEE Xplore API Key (optional for IEEE proceedings)
 IEEE_API_KEY=your_ieee_api_key_here
 
-# Elsevier Scopus API Key (for Scopus indexing)
-# Register at: https://dev.elsevier.com/
+# Elsevier Scopus API Key (optional for Scopus indexing)
 SCOPUS_API_KEY=your_scopus_api_key_here
 ```
 
@@ -108,15 +113,18 @@ The CLI entrypoint is available either via `python main.py` or the installed bin
 Extracts raw paper metadata and raw author affiliation strings into `data/raw/<venue>/<venue>_<year>.json`.
 
 ```bash
-# Extract ICRA papers 2017 to 2025 via IEEE Xplore API
-python main.py extract --venue ICRA --year-start 2017 --year-end 2025 --source ieee
+# Extract ICRA papers via IEEE Xplore API (Default: 1s pacing, max 200 per page, 403/429 exponential backoff)
+python main.py extract --venue ICRA --year-start 2017 --year-end 2026 --source ieee
+
+# Extract ICRA papers via OpenAlex API
+python main.py extract --venue ICRA --year-start 2017 --year-end 2026 --source openalex
 
 # Extract ICRA 2026 from online conference schedule HTML when publisher indexing is pending
 python main.py extract --venue ICRA --year-start 2026 --year-end 2026 --source schedule --schedule-file data/icra2026_program.html
 ```
 
 ### Subcommand 2: `normalize`
-Maps raw affiliation strings against `data/canonical_organizations.json` locally, and batches novel strings for resolution via the Gemini API (`gemini-2.5-flash-lite`). Outputs to `data/normalized/<venue>_<year>_normalized.json`.
+Maps raw affiliation strings against `data/canonical_organizations.json` locally, and batches novel strings for resolution via the Gemini API (`gemini-3.1-flash-lite`). Outputs to `data/normalized/<venue>_<year>_normalized.json`.
 
 ```bash
 python main.py normalize --venue ICRA --year-start 2017 --year-end 2026

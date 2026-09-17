@@ -18,7 +18,9 @@ except ImportError:
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
 
-# API Keys
+# API Keys & Credentials
+OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
+OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 IEEE_API_KEY = os.getenv("IEEE_API_KEY", "")
 SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY", "")
@@ -29,6 +31,7 @@ RAW_DATA_DIR = DATA_DIR / "raw"
 NORMALIZED_DATA_DIR = DATA_DIR / "normalized"
 OUTPUT_DATA_DIR = DATA_DIR / "output"
 CANONICAL_REGISTRY_PATH = DATA_DIR / "canonical_organizations.json"
+OPENALEX_SOURCES_CACHE_PATH = DATA_DIR / "openalex_sources_cache.json"
 LOGS_DIR = BASE_DIR / "logs"
 
 # Ensure directories exist
