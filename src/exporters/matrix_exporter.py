@@ -43,23 +43,20 @@ class MatrixExporter:
 
         if not output_path:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = self.output_dir / f"{venue_upper}_affiliations_{start_year}_{end_year}.csv"
             output_path = self.output_dir / f"{clean_venue}_affiliations_{start_year}_{end_year}.csv"
 
-        logger.info(f"Aggregating matrix for {venue_upper} across years {start_year}..{end_year}")
         logger.info(f"Aggregating matrix for {clean_venue} across years {start_year}..{end_year}")
 
         # Data structure: canonical_id -> year -> count
         counts: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
 
         for y in years:
-            norm_file = self.normalized_dir / f"{venue_upper}_{y}_normalized.json"
             norm_file = self.normalized_dir / f"{clean_venue}_{y}_normalized.json"
             if not norm_file.exists():
-                err_msg = f"Normalized data file for {venue_upper} {y} not found at {norm_file}. Run normalize subcommand first."
                 err_msg = f"Normalized data file for {clean_venue} {y} not found at {norm_file}. Run normalize subcommand first."
                 logger.error(err_msg, exc_info=True)
                 raise FileNotFoundError(err_msg)
+
 
             try:
                 logger.info(f"Opening normalized data file for matrix reading: {norm_file.resolve()}")

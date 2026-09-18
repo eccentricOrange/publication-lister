@@ -18,6 +18,7 @@ DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 NORMALIZED_DATA_DIR = DATA_DIR / "normalized"
 OUTPUT_DATA_DIR = DATA_DIR / "output"
+CLEANED_OUTPUT_DATA_DIR = DATA_DIR / "cleaned_output"
 CANONICAL_REGISTRY_PATH = DATA_DIR / "canonical_organizations.json"
 OPENALEX_SOURCES_CACHE_PATH = DATA_DIR / "openalex_sources_cache.json"
 LOGS_DIR = BASE_DIR / "logs"
@@ -26,4 +27,6 @@ LOGS_DIR = BASE_DIR / "logs"
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 NORMALIZED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+CLEANED_OUTPUT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+

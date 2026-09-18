@@ -11,10 +11,12 @@ from src.extractors.conference_schedule import ConferenceScheduleExtractor
 from src.registry.organization_registry import OrganizationRegistry
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
 from src.exporters.matrix_exporter import MatrixExporter
+from src.cleaner.csv_cleaner import CSVCleaner
 from src.runner.batch_config import BatchConfig
 from src.runner.bulk_runner import BulkRunner
 
 logger = logging.getLogger("main")
+
 
 
 def run_extract(args: argparse.Namespace) -> None:
@@ -113,11 +115,43 @@ def run_export(args: argparse.Namespace) -> None:
     logger.info(f"Export complete: {csv_file}")
 
 
+def run_clean(args: argparse.Namespace) -> None:
+    input_val = getattr(args, "input", None)
+    output_val = getattr(args, "output", None)
+    clean_all_flag = getattr(args, "all", False)
+    venue = getattr(args, "venue", None)
+    start_year = getattr(args, "year_start", None)
+    end_year = getattr(args, "year_end", None)
+
+    cleaner = CSVCleaner()
+
+    if input_val:
+        in_p = Path(input_val)
+        out_p = Path(output_val) if output_val else None
+        if in_p.is_dir():
+            cleaner.clean_all(input_dir=in_p, output_dir=out_p)
+        else:
+            cleaner.clean_file(in_p, output_csv_path=out_p)
+    elif clean_all_flag or (not venue and not start_year):
+        cleaner.clean_all()
+    elif venue and start_year and end_year:
+        from src.utils import sanitize_venue_name
+        clean_venue = sanitize_venue_name(venue)
+        from src.config import OUTPUT_DATA_DIR
+        target_input = OUTPUT_DATA_DIR / f"{clean_venue}_affiliations_{start_year}_{end_year}.csv"
+        target_output = Path(output_val) if output_val else None
+        cleaner.clean_file(target_input, output_csv_path=target_output)
+    else:
+        logger.error("Must specify --input, --all, or venue with --year-start and --year-end for clean subcommand.")
+        sys.exit(1)
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Executing FULL PIPELINE flow...")
     run_extract(args)
     run_normalize(args)
     run_export(args)
+    run_clean(args)
     logger.info("Full pipeline completed successfully.")
 
 
@@ -166,8 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(p_export)
     p_export.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
 
-    # 4. Pipeline subcommand
-    p_pipe = subparsers.add_parser("pipeline", help="Run full extraction, normalization, and export pipeline")
+    # 4. Clean subcommand
+    p_clean = subparsers.add_parser("clean", help="Clean matrix CSVs with Gemini LLM (prune useless/department entries, merge sub-entities)")
+    p_clean.add_argument("--input", "-i", type=str, default=None, help="Input CSV file or directory path")
+    p_clean.add_argument("--output", "-o", type=str, default=None, help="Output cleaned CSV file or directory path")
+    p_clean.add_argument("--venue", "-v_name", type=str, default=None, help="Venue name (optional)")
+    p_clean.add_argument("--year-start", type=int, default=None, help="Start publication year (optional)")
+    p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
+    p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
+    p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
+
+    # 5. Pipeline subcommand
+    p_pipe = subparsers.add_parser("pipeline", help="Run full extraction, normalization, export, and clean pipeline")
     add_common_args(p_pipe)
     p_pipe.add_argument("--source", type=str, choices=["ieee", "openalex", "scopus", "schedule", "all"], default="ieee", help="Data extractor source")
     p_pipe.add_argument("--schedule-file", type=str, default=None, help="Path to local HTML schedule file")
@@ -175,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
     p_pipe.add_argument("--force", action="store_true", help="Force re-run of all pipeline steps")
 
-    # 5. Batch subcommand
+    # 6. Batch subcommand
     p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
     p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
@@ -199,6 +243,8 @@ def cli() -> None:
             run_normalize(args)
         elif args.subcommand == "export":
             run_export(args)
+        elif args.subcommand == "clean":
+            run_clean(args)
         elif args.subcommand == "pipeline":
             run_pipeline(args)
         elif args.subcommand == "batch":
@@ -206,6 +252,7 @@ def cli() -> None:
     except Exception as e:
         logger.error(f"Execution failed on subcommand '{args.subcommand}'", exc_info=True)
         sys.exit(1)
+
 
 
 if __name__ == "__main__":

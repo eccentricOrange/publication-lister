@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.config import NORMALIZED_DATA_DIR, RAW_DATA_DIR
 from src.runner.batch_config import BatchConfig
+from src.cleaner.csv_cleaner import CSVCleaner
 from src.exporters.matrix_exporter import MatrixExporter
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.openalex import OpenAlexExtractor
@@ -18,12 +19,14 @@ logger = logging.getLogger(__name__)
 
 class BulkRunner:
     """
-    Orchestrates multi-venue, multi-year bulk extraction, global pooled normalization, and export.
+    Orchestrates multi-venue, multi-year bulk extraction, global pooled normalization, export, and cleaning.
     - Phase 1: Fetches raw datasets from OpenAlex/IEEE across all venues/years (with pause/resume).
     - Phase 2: Pools raw affiliation strings across all venues into a single resolution phase,
                maximizing cross-venue institution string overlap and minimizing Gemini LLM calls.
     - Phase 3: Aggregates and exports matrix CSVs to data/output/.
+    - Phase 4: Cleans exported matrix CSVs with Gemini LLM into data/cleaned_output/.
     """
+
 
     def __init__(
         self,
@@ -298,11 +301,21 @@ class BulkRunner:
         logger.info(f"Phase 3 Complete: Exported {len(exported_files)} CSV matrix files.")
         return exported_files
 
+    def run_bulk_clean(self, exported_files: Optional[List[Path]] = None) -> List[Path]:
+        """Phase 4: Cleans exported matrix CSVs with Gemini LLM into data/cleaned_output/."""
+        logger.info("=== Phase 4: Bulk Matrix Cleaning ===")
+        cleaner = CSVCleaner(registry=self.registry, gemini_client=self.gemini_client)
+        cleaned_files = cleaner.clean_all(input_dir=self.exporter.output_dir)
+        logger.info(f"Phase 4 Complete: Cleaned {len(cleaned_files)} CSV matrix files into {cleaner.output_dir}.")
+        return cleaned_files
+
     def run_all(self, force: bool = False) -> List[Path]:
-        """Executes full 3-phase bulk pipeline: Extraction -> Global Normalization -> Export."""
+        """Executes full 4-phase bulk pipeline: Extraction -> Global Normalization -> Export -> Cleaning."""
         logger.info(f"Starting Bulk Pipeline across {len(self.config.venues)} venues and years {min(self.config.years)}..{max(self.config.years)}")
         self.run_bulk_extraction(force=force)
         self.run_global_normalization(force=force)
         exported = self.run_bulk_export()
+        cleaned = self.run_bulk_clean(exported)
         logger.info("Bulk Pipeline execution finished successfully.")
-        return exported
+        return cleaned
+

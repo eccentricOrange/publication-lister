@@ -88,6 +88,7 @@ class GeminiClient:
                         http_status_codes=[503, 500, 502, 504, 429, 408],
                     ),
 
+
                 ),
             )
 
