@@ -11,14 +11,6 @@ logger = logging.getLogger(__name__)
 
 IEEE_API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 
-# Venue string mapping for IEEE Xplore API query search
-VENUE_QUERY_MAP = {
-    "ICRA": "IEEE International Conference on Robotics and Automation",
-    "IROS": "IEEE/RSJ International Conference on Intelligent Robots and Systems",
-    "RA-L": "IEEE Robotics and Automation Letters",
-    "TRO": "IEEE Transactions on Robotics",
-}
-
 
 class IEEEExtractor(BaseExtractor):
     """
@@ -38,7 +30,7 @@ class IEEEExtractor(BaseExtractor):
         # Enforce no more than 1 request per second
         self.rate_limit_delay_seconds = 1.0
 
-    def extract(self, venue: str, year: int, force: bool = False) -> Dict[str, Any]:
+    def extract(self, venue: str, year: int, force: bool = False, query_term: Optional[str] = None) -> Dict[str, Any]:
         if not self.api_key:
             err_msg = "IEEE_API_KEY is not set in environment or configuration. Cannot proceed with IEEE extraction."
             logger.error(err_msg, exc_info=True)
@@ -66,7 +58,7 @@ class IEEEExtractor(BaseExtractor):
             except Exception:
                 page_number = 1
 
-        pub_title = VENUE_QUERY_MAP.get(venue_upper, venue)
+        pub_title = query_term or venue_upper
         logger.info(f"Querying IEEE Xplore API for venue '{venue_upper}' ('{pub_title}') year {year}")
 
         total_records = 1
@@ -98,85 +90,65 @@ class IEEEExtractor(BaseExtractor):
                     response = self.session.get(IEEE_API_URL, params=params, timeout=30)
                     if response.status_code in (403, 429):
                         retry_after = response.headers.get("retry-after")
-                        if retry_after and retry_after.isdigit():
-                            sleep_time = float(retry_after)
-                        else:
-                            sleep_time = (2 ** attempt) + random.uniform(0.5, 1.5)
-                        logger.warning(
-                            f"IEEE Xplore API rate/access limited (HTTP {response.status_code}). Retrying in {sleep_time:.2f}s "
-                            f"(Attempt {attempt+1}/{max_retries})..."
-                        )
+                        sleep_time = float(retry_after) if retry_after else (2 ** attempt) * 2.0 + random.uniform(0.5, 1.5)
+                        logger.warning(f"IEEE API rate limited ({response.status_code}). Sleeping {sleep_time:.2f}s (Attempt {attempt+1}/{max_retries})")
                         time.sleep(sleep_time)
                         continue
                     response.raise_for_status()
                     break
-                except requests.HTTPError as http_err:
-                    if response is not None and response.status_code in (403, 429) and attempt < max_retries - 1:
-                        continue
-                    resp_body = response.text if response is not None else "No response body"
-                    logger.error(f"HTTP request to IEEE Xplore API failed for {venue_upper} {year}: {http_err}\nFull Response Body:\n{resp_body}", exc_info=True)
-                    raise http_err
                 except Exception as e:
-                    logger.error(f"Network error querying IEEE Xplore API for {venue_upper} {year}: {e}", exc_info=True)
-                    raise e
+                    if attempt < max_retries - 1:
+                        sleep_time = (2 ** attempt) * 2.0 + random.uniform(0.5, 1.5)
+                        logger.warning(f"Request error querying IEEE Xplore ({e}). Retrying in {sleep_time:.2f}s...")
+                        time.sleep(sleep_time)
+                    else:
+                        logger.error(f"Exhausted retries querying IEEE Xplore for {venue_upper} {year}: {e}", exc_info=True)
+                        raise e
 
-            if not initial_request_done and response is not None:
-                self.inspect_rate_limit_headers(response)
-                initial_request_done = True
-
-            if response is None:
-                err_msg = f"Failed to get response from IEEE Xplore API for {venue_upper} {year}"
-                logger.error(err_msg, exc_info=True)
-                raise RuntimeError(err_msg)
+            if not response:
+                raise RuntimeError(f"Failed receiving data from IEEE API for {venue_upper} {year}")
 
             data = response.json()
-            total_records = int(data.get("total_records", 0))
+            if not initial_request_done:
+                total_records = data.get("total_records", 0)
+                initial_request_done = True
+                logger.info(f"IEEE Xplore total records for {venue_upper} {year}: {total_records}")
+
             articles = data.get("articles", [])
+            paper_batch: List[Dict[str, Any]] = []
 
-            if not articles:
-                logger.warning(f"No articles returned by IEEE Xplore for {venue_upper} {year}")
-                # Mark extraction complete if no more articles returned
-                self.append_raw_batch(venue_upper, year, [], completed=True)
-                break
-
-            page_papers: List[Dict[str, Any]] = []
             for art in articles:
-                paper_id = str(art.get("article_number") or art.get("doi") or art.get("title"))
-                title = art.get("title", "")
-                authors_data = art.get("authors", {}).get("author", [])
-
+                paper_id = art.get("article_number") or art.get("doi") or f"IEEE-{page_number}"
+                title = art.get("title") or ""
+                authors_info = art.get("authors", {}).get("author", [])
+                
                 raw_affiliations: List[str] = []
-                if isinstance(authors_data, list):
-                    for auth in authors_data:
-                        aff = auth.get("affiliation")
-                        if aff:
-                            raw_affiliations.append(aff.strip())
-                elif isinstance(authors_data, dict):
-                    aff = authors_data.get("affiliation")
-                    if aff:
-                        raw_affiliations.append(aff.strip())
+                for auth in authors_info:
+                    aff = auth.get("affiliation")
+                    if aff and str(aff).strip():
+                        raw_affiliations.append(str(aff).strip())
 
-                page_papers.append({
-                    "paper_id": paper_id,
+                paper_batch.append({
+                    "paper_id": str(paper_id),
                     "title": title,
                     "raw_affiliations": raw_affiliations,
                 })
 
-            # Incremental disk caching: flush page papers and update resume start_record state on disk
-            saved_artifact = self.append_raw_batch(
-                venue=venue_upper,
-                year=year,
-                new_papers=page_papers,
-                completed=False,
+            fetched_so_far = (page_number - 1) * max_records + len(paper_batch)
+            is_completed = (fetched_so_far >= total_records or len(paper_batch) == 0)
+
+            checkpoint = self.append_raw_batch(
+                venue_upper,
+                year,
+                paper_batch,
+                completed=is_completed,
                 next_page=page_number + 1,
             )
 
-            current_total = saved_artifact.get("total_papers", 0)
-            if current_total >= total_records or len(articles) < max_records:
-                # Mark completed
-                self.append_raw_batch(venue_upper, year, [], completed=True)
-                break
+            logger.info(f"IEEE Xplore Page {page_number}: +{len(paper_batch)} papers (Total: {checkpoint['total_papers']}/{total_records})")
+
+            if is_completed:
+                logger.info(f"Successfully completed IEEE Xplore harvesting for {venue_upper} {year} ({checkpoint['total_papers']} total papers).")
+                return checkpoint
 
             page_number += 1
-
-        return self.load_cached(venue_upper, year)

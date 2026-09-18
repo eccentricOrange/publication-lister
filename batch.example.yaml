@@ -1,0 +1,27 @@
+# Example batch configuration file for publication-lister
+# Copy this file to batch.yaml in the project root to run:
+#   python3 main.py batch
+
+# List of target venues to harvest and analyze
+venues:
+  - ICRA
+  - IROS
+  - CVPR
+  - NEURIPS
+
+# Publication years (range or explicit list)
+years:
+  start: 2020
+  end: 2025
+
+# Primary extraction data source (openalex, ieee, scopus, schedule, all)
+source: openalex
+
+# Optional per-venue or per-year exceptions/overrides
+exceptions:
+  - venue: IROS
+    years: [2025]
+    openalex_source_id: "S4363608614"
+  - venue: CVPR
+    search_term: "IEEE/CVF Conference on Computer Vision and Pattern Recognition"
+

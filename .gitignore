@@ -1,6 +1,7 @@
 # Environment files
 .env
 .env.local
+batch.yaml
 
 # Virtual Environment
 .venv/

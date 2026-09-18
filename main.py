@@ -11,6 +11,8 @@ from src.extractors.conference_schedule import ConferenceScheduleExtractor
 from src.registry.organization_registry import OrganizationRegistry
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
 from src.exporters.matrix_exporter import MatrixExporter
+from src.runner.batch_config import BatchConfig
+from src.runner.bulk_runner import BulkRunner
 
 logger = logging.getLogger("main")
 
@@ -119,6 +121,17 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Full pipeline completed successfully.")
 
 
+def run_batch(args: argparse.Namespace) -> None:
+    config_path = Path(args.config) if args.config else Path("batch.yaml")
+    force = getattr(args, "force", False)
+
+    logger.info(f"Executing BATCH subcommand with YAML config: {config_path.resolve()}")
+    config = BatchConfig.from_file(config_path)
+    runner = BulkRunner(config=config)
+    runner.run_all(force=force)
+    logger.info("Batch pipeline execution completed successfully.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="affiliation-tracker",
@@ -162,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
     p_pipe.add_argument("--force", action="store_true", help="Force re-run of all pipeline steps")
 
+    # 5. Batch subcommand
+    p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
+    p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
+    p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
+    p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
+
     return parser
 
 
@@ -182,6 +201,8 @@ def cli() -> None:
             run_export(args)
         elif args.subcommand == "pipeline":
             run_pipeline(args)
+        elif args.subcommand == "batch":
+            run_batch(args)
     except Exception as e:
         logger.error(f"Execution failed on subcommand '{args.subcommand}'", exc_info=True)
         sys.exit(1)
