@@ -2,7 +2,7 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.config import CLEANED_OUTPUT_DATA_DIR, OUTPUT_DATA_DIR
 from src.normalizer.gemini_client import GEMINI_MODEL, GeminiClient
@@ -47,38 +47,13 @@ Return ONLY a valid JSON object:
 }
 """
 
-SYSTEM_PROMPT_STEP3_CLEAN = """You are an expert academic metadata cleaning assistant.
-Your task is to produce the final cleaned CSV matrix of institution paper counts across years based on targeted canonical registry entries and merge instructions.
-
-INSTRUCTIONS:
-1. Remove all rows listed in prune_ids.
-2. Apply the requested merges: for each merge group, combine all source_ids into a single row using the canonical_id, canonical_name, and entity_type from the targeted registry entries provided (or clean parent name if not in registry). Sum up paper counts for every year.
-3. Keep all other valid un-merged rows unchanged.
-
-OUTPUT FORMAT:
-Return ONLY a valid JSON object:
-{
-  "cleaned_rows": [
-    {
-      "canonical_id": "UNI-00001-STANFD",
-      "canonical_name": "Stanford University",
-      "entity_type": "UNI",
-      "counts": {
-        "2017": 5,
-        "2018": 12
-      }
-    }
-  ]
-}
-"""
-
 
 class CSVCleaner:
     """
-    Independent tool to clean exported matrix CSV files using a 3-step targeted Gemini LLM workflow.
-    - Step 1: Send CSV rows to Gemini (WITHOUT full canonical list) to identify prunes & request parent names (e.g. "MIT").
-    - Step 2: Look up specific requested parent names locally in OrganizationRegistry to create a small targeted JSON context.
-    - Step 3: Send CSV rows + targeted registry context to Gemini to generate the final cleaned matrix.
+    Independent tool to clean exported matrix CSV files using a hybrid Gemini LLM + Python workflow:
+    - Step 1: Query Gemini LLM with row names to identify prunes & request parent merge names (e.g. "MIT").
+    - Step 2: Look up specific requested parent names locally in OrganizationRegistry (read-only).
+    - Step 3: Deterministically merge/prune rows and aggregate yearly paper counts in Python (fast & fail-proof).
     - Saves cleaned CSV files to data/cleaned_output/ (never overwrites data/output/).
     - Leaves canonical organization registry COMPLETELY UNTOUCHED.
     """
@@ -100,10 +75,10 @@ class CSVCleaner:
         output_csv_path: Optional[Path] = None,
     ) -> Path:
         """
-        Cleans a matrix CSV file using a 3-step targeted Gemini LLM workflow:
-        1. Query Gemini with CSV to get prune_ids and requested_parent_names (e.g. "MIT").
-        2. Look up requested_parent_names locally in OrganizationRegistry.
-        3. Query Gemini with CSV + targeted registry entries to produce the final cleaned matrix.
+        Cleans a matrix CSV file:
+        1. Query Gemini LLM to get prune_ids and requested_parent_names (e.g. "MIT").
+        2. Look up requested_parent_names locally in OrganizationRegistry to obtain canonical entity IDs & names.
+        3. Deterministically aggregate paper counts and output cleaned CSV in Python.
         - Canonical registry is NOT modified.
         """
         input_path = Path(input_csv_path)
@@ -118,7 +93,7 @@ class CSVCleaner:
         output_path = Path(output_csv_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Starting 3-step targeted CSV cleaning for {input_path.resolve()} -> {output_path.resolve()}")
+        logger.info(f"Starting CSV cleaning for {input_path.resolve()} -> {output_path.resolve()}")
 
         with open(input_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -144,18 +119,16 @@ class CSVCleaner:
                 writer.writerows(rows)
             return output_path
 
-        # Format CSV rows compactly for Gemini (NO full canonical list sent)
+        # Format CSV rows compactly for Gemini (NO counts or full canonical list sent)
         compact_rows = []
         for r in rows:
             c_id = r.get("canonical_id", "")
             c_name = r.get("canonical_name", "")
             e_type = r.get("entity_type", "")
-            counts = {y: int(r[y]) for y in year_fields if y in r and str(r[y]).isdigit() and int(r[y]) > 0}
             compact_rows.append({
                 "canonical_id": c_id,
                 "canonical_name": c_name,
                 "entity_type": e_type,
-                "counts": counts,
             })
 
         from google.genai import types
@@ -165,8 +138,8 @@ class CSVCleaner:
             should_return_http_response=True,
         )
 
-        # STEP 1: Ask Gemini to analyze CSV, identify prunes, and request parent names for merges
-        logger.info(f"Step 1: Sending CSV ({len(rows)} rows) to Gemini to identify prunes & request parent merge names...")
+        # STEP 1: Query Gemini to analyze CSV, identify prunes, and request parent names for merges
+        logger.info(f"Step 1: Querying Gemini LLM with {len(rows)} matrix row headers to identify prunes & request parent merge names...")
         payload_step1 = {"matrix_rows": compact_rows}
         contents_step1 = [
             SYSTEM_PROMPT_STEP1_ANALYSIS,
@@ -187,104 +160,112 @@ class CSVCleaner:
         requested_parent_names: List[str] = step1_json.get("requested_parent_names", [])
         merges: List[Dict[str, Any]] = step1_json.get("merges", [])
 
-        # Collect all requested parent names from step1 output
-        all_requested_names: Set[str] = set(requested_parent_names)
+        prune_set: Set[str] = {str(pid).strip().lower() for pid in prune_ids if pid}
+
+        # STEP 2: Look up requested parent names in local OrganizationRegistry to obtain canonical metadata
+        source_id_to_target: Dict[str, Tuple[str, str, str]] = {}
+
         for m in merges:
-            if isinstance(m, dict) and m.get("target_parent_name"):
-                all_requested_names.add(m["target_parent_name"])
+            if not isinstance(m, dict):
+                continue
+            parent_name = (m.get("target_parent_name") or "").strip()
+            sources = m.get("source_ids") or []
+            if not parent_name or not sources:
+                continue
 
-        logger.info(f"Step 1 Complete: Gemini requested {len(all_requested_names)} parent names for merges and identified {len(prune_ids)} rows to prune.")
-
-        # STEP 2: Look up specific requested parent names in local OrganizationRegistry
-        targeted_registry: Dict[str, Any] = {}
-        for parent_name in sorted(list(all_requested_names)):
             match = self.registry.find_by_string(parent_name)
             if match:
-                targeted_registry[parent_name] = {
-                    "canonical_id": match.get("canonical_id"),
-                    "canonical_name": match.get("canonical_name"),
-                    "entity_type": match.get("entity_type"),
-                    "known_aliases": match.get("known_aliases", []),
-                }
-                logger.info(f"Step 2: Registry matched requested parent '{parent_name}' -> {match.get('canonical_id')} ({match.get('canonical_name')})")
+                c_id = match.get("canonical_id", "")
+                c_name = match.get("canonical_name", parent_name)
+                e_type = match.get("entity_type", "UNI")
             else:
-                targeted_registry[parent_name] = {
-                    "canonical_id": None,
-                    "canonical_name": parent_name,
-                    "entity_type": "UNI",
-                }
-                logger.info(f"Step 2: Requested parent '{parent_name}' not in registry. Using clean name.")
+                c_id = "UNI-00000-CUSTOM"
+                c_name = parent_name
+                e_type = "UNI"
 
-        # STEP 3: Send CSV + targeted registry snippet + merge instructions to Gemini for final matrix generation
-        logger.info(f"Step 3: Sending CSV + targeted registry snippet ({len(targeted_registry)} parent entries) to Gemini for final clean matrix generation...")
-        payload_step3 = {
-            "prune_ids": prune_ids,
-            "merges": merges,
-            "targeted_registry_entries": targeted_registry,
-            "matrix_rows": compact_rows,
-        }
+            target_tuple = (c_id, c_name, e_type)
+            for sid in sources:
+                sid_clean = str(sid).strip().lower()
+                if sid_clean:
+                    source_id_to_target[sid_clean] = target_tuple
 
-        contents_step3 = [
-            SYSTEM_PROMPT_STEP3_CLEAN,
-            f"INPUT PAYLOAD:\n{json.dumps(payload_step3, separators=(',', ':'), ensure_ascii=False)}",
-        ]
+            logger.info(f"Step 2: Mapped merge parent '{parent_name}' -> Canonical: {c_id} ({c_name}) for {len(sources)} source IDs")
 
-        self.gemini_client.rate_limiter.acquire()
-        response_step3 = self.gemini_client.client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents_step3,
-            config=config,
-        )
+        # STEP 3: Deterministically aggregate and prune in Python
+        cleaned_map: Dict[Tuple[str, str, str], Dict[str, int]] = {}
+        unmerged_rows: List[Dict[str, Any]] = []
 
-        text_step3 = self.gemini_client._extract_response_text(response_step3)
-        step3_json = json.loads(text_step3)
-        cleaned_list = step3_json.get("cleaned_rows") or step3_json.get("cleaned_matrix") or []
+        for r in rows:
+            raw_id = (r.get("canonical_id") or "").strip()
+            raw_name = (r.get("canonical_name") or "").strip()
+            raw_type = (r.get("entity_type") or "UNI").strip()
 
-        # Process cleaned rows and re-calculate exact totals in Python
-        cleaned_output_rows: List[Dict[str, Any]] = []
-
-        for item in cleaned_list:
-            if not isinstance(item, dict):
-                continue
-            c_id = (item.get("canonical_id") or "").strip()
-            c_name = (item.get("canonical_name") or "").strip()
-            e_type = (item.get("entity_type") or "UNI").strip()
-            item_counts = item.get("counts") or {}
-
-            if not c_name:
+            # Check if row should be pruned
+            if raw_id.lower() in prune_set or raw_name.lower() in prune_set:
+                logger.info(f"Pruning useless row: '{raw_name}' ({raw_id})")
                 continue
 
+            # Check if row belongs to a merge group
+            target_key = source_id_to_target.get(raw_id.lower()) or source_id_to_target.get(raw_name.lower())
+
+            if target_key:
+                if target_key not in cleaned_map:
+                    cleaned_map[target_key] = {y: 0 for y in year_fields}
+
+                for y in year_fields:
+                    val = r.get(y, 0)
+                    cleaned_map[target_key][y] += int(val) if str(val).isdigit() else 0
+            else:
+                unmerged_rows.append(r)
+
+        # Re-construct merged output rows
+        final_output_rows: List[Dict[str, Any]] = []
+
+        for (c_id, c_name, e_type), year_counts in cleaned_map.items():
             row_dict = {
-                "canonical_id": c_id or "UNI-00000-CUSTOM",
+                "canonical_id": c_id,
                 "canonical_name": c_name,
                 "entity_type": e_type,
             }
-
-            total = 0
+            tot = 0
             for y in year_fields:
-                cnt = int(item_counts.get(y, 0)) if str(item_counts.get(y, 0)).isdigit() else 0
+                cnt = year_counts[y]
                 row_dict[y] = cnt
-                total += cnt
+                tot += cnt
+            row_dict["total"] = tot
+            if tot > 0:
+                final_output_rows.append(row_dict)
 
-            row_dict["total"] = total
-            if total > 0:
-                cleaned_output_rows.append(row_dict)
-
-        # Fallback if LLM produced 0 rows: preserve original rows
-        if not cleaned_output_rows:
-            logger.warning("LLM produced 0 cleaned rows. Falling back to original CSV rows.")
-            cleaned_output_rows = rows
+        # Include unmerged valid rows
+        for r in unmerged_rows:
+            c_id = r.get("canonical_id", "")
+            c_name = r.get("canonical_name", "")
+            e_type = r.get("entity_type", "UNI")
+            row_dict = {
+                "canonical_id": c_id,
+                "canonical_name": c_name,
+                "entity_type": e_type,
+            }
+            tot = 0
+            for y in year_fields:
+                val = r.get(y, 0)
+                cnt = int(val) if str(val).isdigit() else 0
+                row_dict[y] = cnt
+                tot += cnt
+            row_dict["total"] = tot
+            if tot > 0:
+                final_output_rows.append(row_dict)
 
         # Sort descending by total, then by canonical_name
-        cleaned_output_rows.sort(key=lambda r: (-int(r.get("total", 0)), str(r.get("canonical_name", ""))))
+        final_output_rows.sort(key=lambda r: (-int(r.get("total", 0)), str(r.get("canonical_name", ""))))
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(cleaned_output_rows)
+            writer.writerows(final_output_rows)
 
-        pruned_count = len(rows) - len(cleaned_output_rows)
-        logger.info(f"CSV Cleaning Complete for {input_path.name}: {len(rows)} input rows -> {len(cleaned_output_rows)} cleaned rows (pruned/combined {pruned_count} entries). Saved to {output_path}")
+        pruned_count = len(rows) - len(final_output_rows)
+        logger.info(f"CSV Cleaning Complete for {input_path.name}: {len(rows)} input rows -> {len(final_output_rows)} cleaned rows (pruned/combined {pruned_count} entries). Saved to {output_path}")
 
         return output_path
 

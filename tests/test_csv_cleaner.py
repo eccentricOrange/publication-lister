@@ -97,7 +97,7 @@ class TestCSVCleaner(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
-        # Mock Gemini 3-step response
+        # Mock Gemini Step 1 response
         mock_gemini = MagicMock()
         mock_gemini.api_key = "dummy_key"
         mock_gemini.rate_limiter = MagicMock()
@@ -113,28 +113,9 @@ class TestCSVCleaner(unittest.TestCase):
             ]
         }
 
-        step3_response_json = {
-            "cleaned_rows": [
-                {
-                    "canonical_id": "UNI-00001-STANFD",
-                    "canonical_name": "Stanford University",
-                    "entity_type": "UNI",
-                    "counts": {"2023": 8, "2024": 12},
-                },
-                {
-                    "canonical_id": "UNI-00002-MITCAM",
-                    "canonical_name": "Massachusetts Institute of Technology",
-                    "entity_type": "UNI",
-                    "counts": {"2023": 8, "2024": 12},
-                },
-            ]
-        }
-
-        mock_gemini._extract_response_text.side_effect = [
-            json.dumps(step1_response_json),
-            json.dumps(step3_response_json),
-        ]
+        mock_gemini._extract_response_text.return_value = json.dumps(step1_response_json)
         mock_gemini.client.models.generate_content.return_value = MagicMock()
+
 
 
         # Record modification time of registry file before cleaning
