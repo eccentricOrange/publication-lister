@@ -3,7 +3,7 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from src.config import (
@@ -21,48 +21,65 @@ OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_SOURCES_URL = "https://api.openalex.org/sources"
 
 
-DEFAULT_DOI_PREFIXES: Dict[str, str] = {
-    "ICRA": "10.1109/icra",
-    "IROS": "10.1109/iros",
-    "CVPR": "10.1109/cvpr",
-    "RA-L": "10.1109/lra",
-    "R-AL": "10.1109/lra",
-    "RAL": "10.1109/lra",
-    "TRO": "10.1109/tro",
-    "T-RO": "10.1109/tro",
-}
-
-def derive_doi_prefix(venue_str: str, explicit_prefix: Optional[str] = None) -> Optional[str]:
+def normalize_cache_entry(entry: Any) -> Dict[str, Any]:
     """
-    Derives DOI prefix dynamically from explicit parameter or venue name string in YAML.
-    - If explicit_prefix is provided, returns explicit_prefix.
-    - Extracts short tag/acronym from venue_str (e.g. 'ICRA (International...)' -> 'ICRA').
-    - Cleans non-alphanumeric characters (e.g. 'T-RO' -> 'tro', 'R-AL' -> 'ral', 'ICRA' -> 'icra').
-    - Constructs '10.1109/{clean_tag}' as candidate IEEE DOI prefix.
+    Normalizes cache entry into standard multi-ID / multi-DOI structure with frequency:
+    {
+        "source_ids": ["S4306506823", ...],
+        "doi_prefixes": ["10.1109/icra", ...],
+        "frequency": "annual",
+        "years": {
+            "2023": {
+                "source_ids": [...],
+                "doi_prefixes": [...]
+            }
+        }
+    }
+    Supports legacy string or list cache entries for 100% backward compatibility.
     """
-    if explicit_prefix and str(explicit_prefix).strip():
-        return str(explicit_prefix).strip()
+    if isinstance(entry, str):
+        clean = entry.split("/")[-1].strip()
+        return {"source_ids": [clean] if clean else [], "doi_prefixes": [], "frequency": "annual", "years": {}}
+    if isinstance(entry, list):
+        clean_list = [str(x).split("/")[-1].strip() for x in entry if str(x).strip()]
+        return {"source_ids": clean_list, "doi_prefixes": [], "frequency": "annual", "years": {}}
+    if isinstance(entry, dict):
+        s_ids = entry.get("source_ids") or []
+        if isinstance(s_ids, str):
+            s_ids = [s_ids]
+        clean_s_ids = [str(x).split("/")[-1].strip() for x in s_ids if str(x).strip()]
 
-    if not venue_str:
-        return None
+        d_prefs = entry.get("doi_prefixes") or []
+        if isinstance(d_prefs, str):
+            d_prefs = [d_prefs]
+        clean_d_prefs = [str(x).strip().lower() for x in d_prefs if str(x).strip()]
 
-    # Extract short tag (part before parentheses if present)
-    raw_tag = venue_str.split("(")[0].strip()
-    clean_tag = "".join(c.lower() for c in raw_tag if c.isalnum())
-    if not clean_tag:
-        return None
+        # Handle legacy "source_id" or "doi_prefix" keys
+        if not clean_s_ids and entry.get("source_id"):
+            clean_s_ids = [str(entry["source_id"]).split("/")[-1].strip()]
+        if not clean_d_prefs and entry.get("doi_prefix"):
+            clean_d_prefs = [str(entry["doi_prefix"]).strip().lower()]
 
-    return f"10.1109/{clean_tag}"
+        freq = str(entry.get("frequency", "annual")).strip().lower()
+
+        years_raw = entry.get("years") or {}
+        norm_years = {}
+        if isinstance(years_raw, dict):
+            for y_k, y_v in years_raw.items():
+                norm_years[str(y_k)] = normalize_cache_entry(y_v)
+
+        return {"source_ids": clean_s_ids, "doi_prefixes": clean_d_prefs, "frequency": freq, "years": norm_years}
+
+    return {"source_ids": [], "doi_prefixes": [], "frequency": "annual", "years": {}}
 
 
 class OpenAlexExtractor(BaseExtractor):
     """
     OpenAlex REST API extractor implementation.
     Harvests publication metadata and institutional affiliations using exact Source IDs or DOI prefixes.
-    - Resolves OpenAlex Source ID via Sources API + Gemini LLM if un-cached.
-    - Caches source IDs in data/openalex_sources_cache.json.
+    - Resolves OpenAlex Source IDs and DOI prefixes via Sources API + sample DOIs + Gemini LLM if un-cached.
+    - Caches source IDs and DOI prefixes (with support for multiple IDs/DOIs and per-year overrides) in data/openalex_sources_cache.json.
     - Queries Works API using primary_location.source.id or doi_starts_with (never unconstrained raw text search).
-    - Queries Works API using primary_location.source.id or dynamically derived doi_starts_with.
     - Supports deterministic pause-and-resume via cursor tokens.
     """
 
@@ -80,8 +97,8 @@ class OpenAlexExtractor(BaseExtractor):
         self.gemini_client = GeminiClient()
         self.rate_limit_delay_seconds = 0.15
 
-    def _load_sources_cache(self) -> Dict[str, str]:
-        """Loads cached venue -> OpenAlex Source ID map."""
+    def _load_sources_cache(self) -> Dict[str, Any]:
+        """Loads cached venue -> OpenAlex Source info map."""
         if not self.sources_cache_path.exists() or self.sources_cache_path.stat().st_size == 0:
             return {}
         try:
@@ -91,8 +108,8 @@ class OpenAlexExtractor(BaseExtractor):
         except Exception:
             return {}
 
-    def _save_sources_cache(self, cache: Dict[str, str]) -> None:
-        """Saves venue -> OpenAlex Source ID map to disk."""
+    def _save_sources_cache(self, cache: Dict[str, Any]) -> None:
+        """Saves venue -> OpenAlex Source info map to disk."""
         try:
             self.sources_cache_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Opening file for writing OpenAlex sources cache: {self.sources_cache_path.resolve()}")
@@ -101,157 +118,302 @@ class OpenAlexExtractor(BaseExtractor):
         except Exception as e:
             logger.warning(f"Failed writing OpenAlex sources cache file: {e}")
 
+    def _get_cached_source_info(
+        self,
+        cache: Dict[str, Any],
+        venue_key: str,
+        year: Optional[int] = None,
+    ) -> Tuple[List[str], List[str], str]:
+        """Retrieves cached source_ids, doi_prefixes, and frequency for a venue and optional year."""
+        if venue_key not in cache:
+            return [], [], "annual"
+
+        norm_entry = normalize_cache_entry(cache[venue_key])
+        freq = norm_entry.get("frequency", "annual")
+        if year is not None and "years" in norm_entry and str(year) in norm_entry["years"]:
+            y_entry = norm_entry["years"][str(year)]
+            y_ids = y_entry.get("source_ids", [])
+            y_prefs = y_entry.get("doi_prefixes", [])
+            if y_ids or y_prefs:
+                eff_ids = y_ids if y_ids else norm_entry.get("source_ids", [])
+                eff_prefs = y_prefs if y_prefs else norm_entry.get("doi_prefixes", [])
+                return eff_ids, eff_prefs, freq
+
+        return norm_entry.get("source_ids", []), norm_entry.get("doi_prefixes", []), freq
+
+    def _update_sources_cache(
+        self,
+        cache: Dict[str, Any],
+        venue_key: str,
+        source_ids: List[str],
+        doi_prefixes: List[str],
+        frequency: str = "annual",
+        year: Optional[int] = None,
+    ) -> None:
+        """Updates and persists source_ids, doi_prefixes, and frequency in cache for a venue and optional year."""
+        curr_entry = normalize_cache_entry(cache.get(venue_key, {}))
+        curr_entry["frequency"] = frequency
+
+        if year is not None:
+            if "years" not in curr_entry:
+                curr_entry["years"] = {}
+            curr_entry["years"][str(year)] = {
+                "source_ids": source_ids,
+                "doi_prefixes": doi_prefixes,
+            }
+
+        for s in source_ids:
+            if s not in curr_entry["source_ids"]:
+                curr_entry["source_ids"].append(s)
+        for d in doi_prefixes:
+            if d not in curr_entry["doi_prefixes"]:
+                curr_entry["doi_prefixes"].append(d)
+
+        cache[venue_key] = curr_entry
+        self._save_sources_cache(cache)
+
+    def _fetch_sample_doi_prefixes(self, source_id: str, headers: Dict[str, str]) -> List[str]:
+        """Queries OpenAlex Works API for up to 3 sample works of a candidate source ID to extract actual DOI prefixes."""
+        clean_id = source_id.split("/")[-1]
+        params: Dict[str, Any] = {
+            "filter": f"primary_location.source.id:{clean_id}",
+            "per-page": 3,
+            "select": "doi",
+        }
+        if self.api_key:
+            params["api_key"] = self.api_key
+        elif self.mailto:
+            params["mailto"] = self.mailto
+
+        prefixes = set()
+        try:
+            self.enforce_pacing()
+            res = self.session.get(OPENALEX_WORKS_URL, headers=headers, params=params, timeout=15)
+            if res.status_code == 200:
+                works = res.json().get("results", [])
+                for w in works:
+                    doi_url = w.get("doi") or ""
+                    if doi_url:
+                        clean_doi = doi_url.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
+                        parts = clean_doi.split("/")
+                        if len(parts) >= 2:
+                            prefix = f"{parts[0]}/{parts[1]}".lower()
+                            prefixes.add(prefix)
+        except Exception as e:
+            logger.debug(f"Could not fetch sample DOI prefix for source {clean_id}: {e}")
+        return list(prefixes)
+
+    def resolve_source_info(
+        self,
+        venue: str,
+        year: Optional[int] = None,
+        search_term: Optional[str] = None,
+        openalex_source_id: Optional[Any] = None,
+        doi_prefix: Optional[Any] = None,
+    ) -> Tuple[List[str], List[str], str]:
+        """
+        Resolves OpenAlex Source IDs, DOI prefixes, and venue publication frequency for a given venue and optional year.
+        Uses explicit parameters if provided; otherwise checks local cache or queries OpenAlex Sources API + sample DOIs + Gemini LLM.
+        """
+        venue_key = sanitize_venue_name(venue)
+        cache = self._load_sources_cache()
+
+        # Parse explicit parameters
+        explicit_source_ids = []
+        if openalex_source_id:
+            if isinstance(openalex_source_id, str):
+                explicit_source_ids = [s.strip().split("/")[-1] for s in openalex_source_id.split(",") if s.strip()]
+            elif isinstance(openalex_source_id, list):
+                explicit_source_ids = [str(s).strip().split("/")[-1] for s in openalex_source_id if str(s).strip()]
+
+        explicit_doi_prefixes = []
+        if doi_prefix:
+            if isinstance(doi_prefix, str):
+                explicit_doi_prefixes = [d.strip().lower() for d in doi_prefix.split(",") if d.strip()]
+            elif isinstance(doi_prefix, list):
+                explicit_doi_prefixes = [str(d).strip().lower() for d in doi_prefix if str(d).strip()]
+
+        if explicit_source_ids or explicit_doi_prefixes:
+            logger.info(
+                f"Using explicit configuration for venue '{venue_key}': "
+                f"source_ids={explicit_source_ids}, doi_prefixes={explicit_doi_prefixes}"
+            )
+            self._update_sources_cache(cache, venue_key, explicit_source_ids, explicit_doi_prefixes, frequency="annual", year=year)
+            return explicit_source_ids, explicit_doi_prefixes, "annual"
+
+        # Check local cache
+        cached_ids, cached_prefs, cached_freq = self._get_cached_source_info(cache, venue_key, year=year)
+        if cached_ids or cached_prefs:
+            logger.info(
+                f"Using cached OpenAlex source info for venue '{venue_key}' (year={year}): "
+                f"source_ids={cached_ids}, doi_prefixes={cached_prefs}, frequency={cached_freq}"
+            )
+            return cached_ids, cached_prefs, cached_freq
+
+        # Construct list of search terms
+        search_terms_list: List[str] = []
+        if isinstance(search_term, list):
+            search_terms_list = [str(s).strip() for s in search_term if str(s).strip()]
+        elif isinstance(search_term, str) and search_term.strip():
+            search_terms_list = [search_term.strip()]
+
+        if not search_terms_list:
+            search_terms_list = [venue]
+
+        headers: Dict[str, str] = {}
+        if self.api_key:
+            headers["api-key"] = self.api_key
+
+        # Collect and deduplicate candidates across ALL search terms
+        all_candidates_by_id: Dict[str, Dict[str, Any]] = {}
+        for st_term in search_terms_list:
+            logger.info(f"Resolving OpenAlex Source IDs & DOIs for venue '{venue_key}' using search term '{st_term}' via Sources API...")
+            params: Dict[str, Any] = {"search": st_term}
+            if self.api_key:
+                params["api_key"] = self.api_key
+            elif self.mailto:
+                params["mailto"] = self.mailto
+
+            try:
+                self.enforce_pacing()
+                res = self.session.get(OPENALEX_SOURCES_URL, headers=headers, params=params, timeout=30)
+                if res.status_code == 200:
+                    results = res.json().get("results", [])
+                    for cand in results:
+                        cand_id = cand.get("id", "").split("/")[-1]
+                        if cand_id and cand_id not in all_candidates_by_id:
+                            all_candidates_by_id[cand_id] = cand
+            except Exception as e:
+                logger.warning(f"Error querying OpenAlex Sources API for search term '{st_term}': {e}")
+
+        raw_results = list(all_candidates_by_id.values())
+        if not raw_results:
+            err_msg = f"No OpenAlex sources found for search terms {search_terms_list}"
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+
+        valid_results = [c for c in raw_results if (c.get("works_count") or 0) > 0]
+        if not valid_results:
+            valid_results = raw_results
+
+        # Fetch sample DOI prefixes for ALL candidate sources with works_count > 0
+        for cand in valid_results:
+            cand_id = cand.get("id", "").split("/")[-1]
+            if cand_id and (cand.get("works_count") or 0) > 0:
+                sample_prefs = self._fetch_sample_doi_prefixes(cand_id, headers)
+                cand["sample_doi_prefixes"] = sample_prefs
+            else:
+                cand["sample_doi_prefixes"] = []
+
+        logger.info(f"Sending ALL {len(valid_results)} unique candidate OpenAlex sources (collected across search terms {search_terms_list}) to Gemini LLM for evaluation...")
+        gemini_res = self.gemini_client.resolve_openalex_venue_sources(
+            venue_key,
+            valid_results,
+            short_name=venue_key,
+            search_term=search_terms_list if len(search_terms_list) > 1 else search_terms_list[0],
+        )
+        resolved_ids = gemini_res.get("source_ids", [])
+        resolved_prefs = gemini_res.get("doi_prefixes", [])
+        resolved_freq = gemini_res.get("frequency", "annual")
+
+        if not resolved_ids and valid_results:
+            best_cand = max(valid_results, key=lambda x: x.get("works_count", 0))
+            best_id = best_cand.get("id", "").split("/")[-1]
+            if best_id:
+                resolved_ids = [best_id]
+                resolved_prefs = best_cand.get("sample_doi_prefixes", [])
+                logger.info(f"Fallback selected source ID '{best_id}' ({best_cand.get('display_name')}) with max works_count={best_cand.get('works_count')}")
+
+        self._update_sources_cache(cache, venue_key, resolved_ids, resolved_prefs, frequency=resolved_freq, year=year)
+        logger.info(
+            f"Successfully cached OpenAlex source info for venue '{venue_key}' (year={year}): "
+            f"source_ids={resolved_ids}, doi_prefixes={resolved_prefs}, frequency={resolved_freq}"
+        )
+        return resolved_ids, resolved_prefs, resolved_freq
+
     def resolve_source_id(
         self,
         venue: str,
         search_term: Optional[str] = None,
         openalex_source_id: Optional[str] = None,
     ) -> str:
-        """
-        Resolves OpenAlex Source ID for a given venue abbreviation or full name.
-        Uses explicit openalex_source_id if provided; otherwise checks local cache or queries OpenAlex Sources API.
-        All candidate results from OpenAlex Sources API are evaluated by Gemini LLM.
-        """
-        venue_key = sanitize_venue_name(venue)
-
-        if openalex_source_id:
-            clean_id = openalex_source_id.split("/")[-1]
-            logger.info(f"Using explicitly configured OpenAlex Source ID for venue '{venue_key}': {clean_id}")
-            cache = self._load_sources_cache()
-            cache[venue_key] = clean_id
-            self._save_sources_cache(cache)
-            return clean_id
-
-        cache = self._load_sources_cache()
-        if venue_key in cache:
-            cached_id = cache[venue_key]
-            logger.info(f"Using cached OpenAlex Source ID for venue '{venue_key}': {cached_id}")
-            return cached_id
-
-        venue_search_term = search_term or venue
-        logger.info(f"Resolving OpenAlex Source ID for venue '{venue_key}' ('{venue_search_term}') via Sources API...")
-
-        headers: Dict[str, str] = {}
-        if self.api_key:
-            headers["api-key"] = self.api_key
-
-        params: Dict[str, Any] = {"search": venue_search_term}
-        if self.api_key:
-            params["api_key"] = self.api_key
-        elif self.mailto:
-            params["mailto"] = self.mailto
-
-        prepared_url = requests.Request("GET", OPENALEX_SOURCES_URL, headers=headers, params=params).prepare().url
-        logger.info(f"Querying OpenAlex Sources URL: {prepared_url}")
-
-        self.enforce_pacing()
-        response = self.session.get(OPENALEX_SOURCES_URL, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-
-        data = response.json()
-        raw_results = data.get("results", [])
-
-        if not raw_results:
-            err_msg = f"No OpenAlex sources found for venue search term '{venue_search_term}'"
-            logger.error(err_msg)
-            raise ValueError(err_msg)
-
-        # Filter out candidates with 0 works if candidates with works > 0 exist
-        results = [c for c in raw_results if (c.get("works_count") or 0) > 0]
-        if not results:
-            results = raw_results
-
-        logger.info(f"Found {len(results)} candidate sources for '{venue_key}'. Invoking Gemini LLM to select best match...")
-        gemini_selected = self.gemini_client.resolve_openalex_source(
-            venue_key,
-            results,
-            short_name=venue_key,
-            search_term=venue_search_term,
+        """Backward compatible wrapper around resolve_source_info."""
+        s_ids, _, _ = self.resolve_source_info(
+            venue, search_term=search_term, openalex_source_id=openalex_source_id
         )
-        if gemini_selected:
-            source_id = gemini_selected
-        elif len(results) == 1:
-            raw_id = results[0].get("id", "")
-            source_id = raw_id.split("/")[-1]
-            logger.info(f"Fallback: using single candidate source ID '{source_id}' for '{venue_key}'")
-        else:
-            best_cand = max(results, key=lambda x: x.get("works_count", 0))
-            source_id = best_cand.get("id", "").split("/")[-1]
-            logger.info(f"Fallback selected source ID '{source_id}' ({best_cand.get('display_name')}) with max works_count={best_cand.get('works_count')}")
-
-        cache[venue_key] = source_id
-        self._save_sources_cache(cache)
-        logger.info(f"Successfully cached OpenAlex Source ID for venue '{venue_key}': {source_id}")
-        return source_id
+        return s_ids[0] if s_ids else ""
 
     def _determine_filter_params(
         self,
         venue_upper: str,
         year: int,
-        source_id: str,
+        source_ids: List[str],
+        doi_prefixes: List[str],
         headers: Dict[str, str],
         search_term: Optional[str] = None,
-        doi_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Determines optimal filter parameters for OpenAlex Works API.
-        Tries primary_location.source.id first; if 0 results returned, falls back to doi_starts_with.
-        Tries primary_location.source.id first; if 0 results returned, falls back to dynamically derived doi_starts_with.
+        Tries primary_location.source.id (supporting multi-ID OR) first.
+        If count is 0, tries doi_starts_with (supporting candidate DOI prefixes resolved via OpenAlex & Gemini).
         STRICT REQUIREMENT: Never falls back to unconstrained raw text search ('search: {venue}').
         """
-        effective_doi_prefix = doi_prefix or DEFAULT_DOI_PREFIXES.get(venue_upper)
-        if not effective_doi_prefix:
-            # Try cleaning venue name (e.g., 'T-RO' -> 'TRO', 'R-AL' -> 'RAL')
-            clean_key = venue_upper.replace(" ", "").replace("-", "").replace("_", "")
-            effective_doi_prefix = DEFAULT_DOI_PREFIXES.get(clean_key)
-        effective_doi_prefix = derive_doi_prefix(venue_upper, explicit_prefix=doi_prefix)
+        # 1. Try primary_location.source.id
+        if source_ids:
+            source_filter = f"publication_year:{year},primary_location.source.id:{'|'.join(source_ids)}"
+            test_params: Dict[str, Any] = {
+                "filter": source_filter,
+                "per-page": 1,
+            }
+            if self.api_key:
+                test_params["api_key"] = self.api_key
+            elif self.mailto:
+                test_params["mailto"] = self.mailto
 
-        test_filter = f"publication_year:{year},primary_location.source.id:{source_id}"
-        test_params: Dict[str, Any] = {
-            "filter": test_filter,
-            "per-page": 1,
-        }
-        if self.api_key:
-            test_params["api_key"] = self.api_key
-        elif self.mailto:
-            test_params["mailto"] = self.mailto
-
-        self.enforce_pacing()
-        try:
-            res = self.session.get(OPENALEX_WORKS_URL, headers=headers, params=test_params, timeout=30)
-            if res.status_code == 200:
-                cnt = res.json().get("meta", {}).get("count", 0)
-                if cnt > 0:
-                    logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: primary_location.source.id:{source_id} (count={cnt})")
-                    return {"filter": test_filter}
-        except Exception as e:
-            logger.warning(f"Failed testing primary_location.source.id filter for {venue_upper} {year}: {e}")
-
-        # Fallback 1: doi_starts_with
-        # Fallback 1: doi_starts_with (derived dynamically from venue string or explicit config)
-        if effective_doi_prefix:
-            doi_filter = f"publication_year:{year},doi_starts_with:{effective_doi_prefix}"
-            test_params["filter"] = doi_filter
             self.enforce_pacing()
             try:
                 res = self.session.get(OPENALEX_WORKS_URL, headers=headers, params=test_params, timeout=30)
                 if res.status_code == 200:
                     cnt = res.json().get("meta", {}).get("count", 0)
                     if cnt > 0:
-                        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: doi_starts_with:{effective_doi_prefix} (count={cnt})")
+                        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: {source_filter} (count={cnt})")
+                        return {"filter": source_filter}
+            except Exception as e:
+                logger.warning(f"Failed testing primary_location.source.id filter for {venue_upper} {year}: {e}")
+
+        # 2. Try doi_starts_with
+        if doi_prefixes:
+            doi_filter = f"publication_year:{year},doi_starts_with:{'|'.join(doi_prefixes)}"
+            test_params = {
+                "filter": doi_filter,
+                "per-page": 1,
+            }
+            if self.api_key:
+                test_params["api_key"] = self.api_key
+            elif self.mailto:
+                test_params["mailto"] = self.mailto
+
+            self.enforce_pacing()
+            try:
+                res = self.session.get(OPENALEX_WORKS_URL, headers=headers, params=test_params, timeout=30)
+                if res.status_code == 200:
+                    cnt = res.json().get("meta", {}).get("count", 0)
+                    if cnt > 0:
+                        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: {doi_filter} (count={cnt})")
                         return {"filter": doi_filter}
             except Exception as e:
                 logger.warning(f"Failed testing doi_starts_with filter for {venue_upper} {year}: {e}")
 
-        # Strict: If count is 0 for both source_id and doi_starts_with, DO NOT fall back to unconstrained raw text search.
-        if effective_doi_prefix:
-            fallback_filter = f"publication_year:{year},doi_starts_with:{effective_doi_prefix}"
+        # 3. Fallback filter (count=0)
+        if doi_prefixes:
+            fallback_filter = f"publication_year:{year},doi_starts_with:{'|'.join(doi_prefixes)}"
+        elif source_ids:
+            fallback_filter = f"publication_year:{year},primary_location.source.id:{'|'.join(source_ids)}"
         else:
-            fallback_filter = f"publication_year:{year},primary_location.source.id:{source_id}"
+            fallback_filter = f"publication_year:{year}"
 
         logger.warning(
-            f"No OpenAlex works found for {venue_upper} {year} with source ID '{source_id}' or DOI prefix '{effective_doi_prefix}'. "
-            f"No OpenAlex works found for {venue_upper} {year} with source ID '{source_id}' or derived DOI prefix '{effective_doi_prefix}'. "
+            f"No OpenAlex works found for {venue_upper} {year} with source IDs '{source_ids}' or DOI prefixes '{doi_prefixes}'. "
             f"Using filter '{fallback_filter}' (count=0) to prevent unconstrained raw search corruption."
         )
         return {"filter": fallback_filter}
@@ -262,8 +424,8 @@ class OpenAlexExtractor(BaseExtractor):
         year: int,
         force: bool = False,
         search_term: Optional[str] = None,
-        openalex_source_id: Optional[str] = None,
-        doi_prefix: Optional[str] = None,
+        openalex_source_id: Optional[Any] = None,
+        doi_prefix: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if not self.api_key and not self.mailto:
             err_msg = "Neither OPENALEX_API_KEY nor OPENALEX_MAILTO is set in environment or configuration. Cannot proceed with OpenAlex extraction."
@@ -277,7 +439,27 @@ class OpenAlexExtractor(BaseExtractor):
             logger.info(f"Raw data for {venue_upper} {year} is fully cached and completed.")
             return self.load_cached(venue_upper, year)
 
-        source_id = self.resolve_source_id(venue_upper, search_term=search_term, openalex_source_id=openalex_source_id)
+        source_ids, doi_prefixes, frequency = self.resolve_source_info(
+            venue_upper,
+            year=year,
+            search_term=search_term,
+            openalex_source_id=openalex_source_id,
+            doi_prefix=doi_prefix,
+        )
+
+        # Off-year check for biennial conferences
+        is_off_year = False
+        if frequency == "biennial_even" and (year % 2 != 0):
+            is_off_year = True
+        elif frequency == "biennial_odd" and (year % 2 == 0):
+            is_off_year = True
+
+        if is_off_year:
+            logger.info(
+                f"Venue '{venue_upper}' is identified as a biennial conference ({frequency}). "
+                f"Year {year} is an off-year. Skipping OpenAlex API harvesting and marking dataset completed with 0 papers."
+            )
+            return self.append_raw_batch(venue_upper, year, [], completed=True, next_cursor=None)
 
         cursor = "*"
         existing_papers_count = 0
@@ -296,7 +478,7 @@ class OpenAlexExtractor(BaseExtractor):
             headers["api-key"] = self.api_key
 
         base_filter_params = self._determine_filter_params(
-            venue_upper, year, source_id, headers, search_term=search_term, doi_prefix=doi_prefix
+            venue_upper, year, source_ids, doi_prefixes, headers, search_term=search_term
         )
 
         select_fields = "id,doi,title,authorships,primary_location"

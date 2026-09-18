@@ -84,6 +84,25 @@ source: openalex
         icra_overrides = config.get_overrides("ICRA", 2024)
         self.assertEqual(icra_overrides.get("search_term"), "International Conference on Robotics and Automation")
 
+    def test_multiple_search_terms_parsing(self):
+        custom_yaml = self.root_path / "multi_search_batch.yaml"
+        content = """
+        venues:
+        - search_term:
+            - "European Conference on Computer Vision"
+            - "ECCV"
+            short_name: ECCV
+        years: [2024]
+        source: openalex
+        """
+        with open(custom_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        config = BatchConfig.from_file(custom_yaml)
+        self.assertEqual(config.venues, ["ECCV"])
+        eccv_overrides = config.get_overrides("ECCV", 2024)
+        self.assertEqual(eccv_overrides.get("search_term"), ["European Conference on Computer Vision", "ECCV"])
+
 
 if __name__ == "__main__":
     unittest.main()

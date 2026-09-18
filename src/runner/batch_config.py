@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VenueConfig:
-    search_term: str
+    search_term: Any  # str or List[str]
     short_name: str
-    openalex_source_id: Optional[str] = None
-    doi_prefix: Optional[str] = None
-    query_term: Optional[str] = None
+    openalex_source_id: Optional[Any] = None
+    doi_prefix: Optional[Any] = None
+    query_term: Optional[Any] = None
     source: Optional[str] = None
 
 
@@ -24,10 +24,10 @@ class VenueException:
     venue: str
     years: Optional[List[int]] = None
     source: Optional[str] = None
-    openalex_source_id: Optional[str] = None
-    search_term: Optional[str] = None
-    doi_prefix: Optional[str] = None
-    query_term: Optional[str] = None
+    openalex_source_id: Optional[Any] = None
+    search_term: Optional[Any] = None  # str or List[str]
+    doi_prefix: Optional[Any] = None
+    query_term: Optional[Any] = None
 
 
 @dataclass
@@ -56,6 +56,14 @@ class BatchConfig:
         raw_venues = raw_data.get("venues", [])
         venue_configs: List[VenueConfig] = []
 
+        def parse_search_term(raw_val: Any) -> Any:
+            if isinstance(raw_val, list):
+                clean_list = [str(x).strip() for x in raw_val if str(x).strip()]
+                return clean_list if clean_list else ""
+            if isinstance(raw_val, str):
+                return raw_val.strip()
+            return ""
+
         if isinstance(raw_venues, list):
             for item in raw_venues:
                 if isinstance(item, str) and item.strip():
@@ -63,11 +71,13 @@ class BatchConfig:
                     sn = sanitize_venue_name(st)
                     venue_configs.append(VenueConfig(search_term=st, short_name=sn))
                 elif isinstance(item, dict):
-                    st = (item.get("search_term") or item.get("search") or item.get("name") or item.get("venue") or "").strip()
+                    st_raw = item.get("search_term") or item.get("search_terms") or item.get("search") or item.get("name") or item.get("venue")
+                    st = parse_search_term(st_raw)
                     if not st:
                         continue
                     sn_raw = (item.get("short_name") or item.get("short_code") or item.get("code") or item.get("short") or "").strip()
-                    sn = sanitize_venue_name(sn_raw) if sn_raw else sanitize_venue_name(st)
+                    first_st = st[0] if isinstance(st, list) else st
+                    sn = sanitize_venue_name(sn_raw) if sn_raw else sanitize_venue_name(first_st)
                     venue_configs.append(
                         VenueConfig(
                             search_term=st,
@@ -117,13 +127,16 @@ class BatchConfig:
                     elif isinstance(ex_years_raw, int):
                         ex_years = [ex_years_raw]
 
+                    ex_st_raw = item.get("search_term") or item.get("search_terms") or item.get("search")
+                    ex_st = parse_search_term(ex_st_raw) if ex_st_raw else None
+
                     exceptions.append(
                         VenueException(
                             venue=ex_venue,
                             years=ex_years,
                             source=item.get("source"),
                             openalex_source_id=item.get("openalex_source_id"),
-                            search_term=item.get("search_term"),
+                            search_term=ex_st,
                             doi_prefix=item.get("doi_prefix"),
                             query_term=item.get("query_term"),
                         )
@@ -172,3 +185,13 @@ class BatchConfig:
                         merged["query_term"] = ex.query_term
 
         return merged
+
+    def is_year_active(self, venue: str, year: int) -> bool:
+        """Checks if a year is explicitly active for a venue based on YAML exceptions."""
+        clean_target = sanitize_venue_name(venue)
+        for ex in self.exceptions:
+            clean_ex = sanitize_venue_name(ex.venue)
+            if clean_ex == clean_target or ex.venue.upper() == venue.upper():
+                if ex.years is not None and year not in ex.years:
+                    return False
+        return True

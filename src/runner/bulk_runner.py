@@ -59,6 +59,10 @@ class BulkRunner:
 
         for venue in self.config.venues:
             for year in self.config.years:
+                if not self.config.is_year_active(venue, year):
+                    logger.info(f"Skipping {venue} {year}: inactive year specified in batch configuration exceptions.")
+                    continue
+
                 overrides = self.config.get_overrides(venue, year)
                 source = overrides.get("source", self.config.default_source)
                 logger.info(f"Extracting raw data for {venue} {year} (source={source})...")

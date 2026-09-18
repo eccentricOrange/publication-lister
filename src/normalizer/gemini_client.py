@@ -81,14 +81,12 @@ class GeminiClient:
                 http_options=types.HttpOptions(
                     timeout=120_000,
                     retry_options=types.HttpRetryOptions(
-                        attempts=15,
+                        attempts=10,
                         initial_delay=15.0,
                         max_delay=300.0,
                         exp_base=2.0,
                         http_status_codes=[503, 500, 502, 504, 429, 408],
                     ),
-
-
                 ),
             )
 
@@ -213,7 +211,6 @@ class GeminiClient:
                     if len(pruned_registry) >= 120:
                         break
 
-        # Pipe-delimited line size is ~15 tokens per entry vs 50 tokens for JSON
         est_registry_tokens = len(pruned_registry) * 15 + 300
         avail_token_budget = max(2000, target_tokens_per_req - est_registry_tokens)
         optimal_count = max(10, min(50, avail_token_budget // 15))
@@ -253,7 +250,6 @@ class GeminiClient:
             response_mime_type="application/json",
             should_return_http_response=True,
         )
-
 
         for attempt in range(max_retries):
             self.rate_limiter.acquire()
@@ -305,7 +301,6 @@ class GeminiClient:
 
                 if is_429:
                     if retry_secs is not None:
-                        # Round UP to nearest multiple of 10 seconds (minimum 10s)
                         sleep_time = max(10.0, math.ceil(retry_secs / 10.0) * 10.0)
                         logger.warning(
                             f"Gemini API Rate limited (429). API requested retry in {retry_secs:.2f}s -> "
@@ -341,59 +336,65 @@ class GeminiClient:
                     logger.error(f"Failed Gemini API normalization query after {max_retries} attempts: {e}", exc_info=True)
                     raise e
 
-
         err_msg = f"Exhausted retries ({max_retries}) querying Gemini API for batch normalization."
         logger.error(err_msg, exc_info=True)
         raise RuntimeError(err_msg)
 
-    def resolve_openalex_source(
+    def resolve_openalex_venue_sources(
         self,
         venue: str,
         candidates: List[Dict[str, Any]],
         short_name: Optional[str] = None,
         search_term: Optional[str] = None,
         max_retries: int = 10,
-    ) -> Optional[str]:
+    ) -> Dict[str, Any]:
         """
-        Uses Gemini LLM to analyze candidate OpenAlex source records for a venue,
-        and select the single best matching primary source ID (e.g. 'S4363608614').
+        Uses Gemini LLM to analyze candidate OpenAlex source records and sample work DOIs for a venue,
+        and select matching primary OpenAlex source IDs, DOI prefixes, and venue frequency (annual vs biennial_even vs biennial_odd).
         Presents both short_name (e.g. 'IROS') and search_term (e.g. 'IEEE/RSJ International Conference...') to LLM.
         """
         if not candidates:
-            return None
+            return {"source_ids": [], "doi_prefixes": [], "frequency": "annual"}
         if not self.api_key:
-            logger.warning("GEMINI_API_KEY missing. Skipping Gemini LLM OpenAlex source selection.")
-            return None
-
-        # Prefer candidates with non-zero works_count
-        valid_candidates = [c for c in candidates if (c.get("works_count") or 0) > 0]
-        if not valid_candidates:
-            valid_candidates = candidates
+            logger.warning("GEMINI_API_KEY missing. Skipping Gemini LLM OpenAlex source resolution.")
+            return {"source_ids": [], "doi_prefixes": [], "frequency": "annual"}
 
         cand_summaries = []
-        for c in valid_candidates:
+        for c in candidates:
             cand_summaries.append({
                 "id": c.get("id"),
                 "display_name": c.get("display_name"),
                 "type": c.get("type"),
+                "publisher": c.get("publisher"),
+                "host_organization_name": c.get("host_organization_name"),
                 "works_count": c.get("works_count"),
+                "cited_by_count": c.get("cited_by_count"),
                 "first_publication_year": c.get("first_publication_year"),
                 "last_publication_year": c.get("last_publication_year"),
+                "issn_l": c.get("issn_l"),
+                "issn": c.get("issn"),
+                "ids": c.get("ids"),
+                "sample_doi_prefixes": c.get("sample_doi_prefixes", []),
             })
 
         system_prompt = (
             "You are an expert academic publication metadata assistant.\n"
-            "Given a target academic conference or journal venue short name and search term, and a list of candidate OpenAlex source objects, "
-            "select the single best matching primary OpenAlex Source ID (e.g. 'S4363608614') that contains publication works (works_count > 0).\n"
-            "Pick the candidate that represents the main conference/journal proceedings series.\n"
+            "Given a target academic conference or journal venue short name and search term, and the complete list of candidate OpenAlex source records from the OpenAlex Sources API (including publication counts, publisher/host organization, DOIs, and sample DOI prefixes extracted from real works),\n"
+            "analyze all candidates and select:\n"
+            "1. ALL matching primary OpenAlex Source IDs (e.g. ['S4363608614']) and valid DOI prefixes (e.g. ['10.1109/icra']) for this venue.\n"
+            "2. Venue publication frequency ('annual', 'biennial_even' for conferences held in even years like ECCV, 'biennial_odd' for conferences held in odd years like ICCV, or 'irregular').\n"
+            "If multiple source IDs represent different volumes, proceedings series, or years for the same venue, include all relevant source IDs.\n"
             "Output JSON format:\n"
-            '{\n  "selected_source_id": "S4363608614",\n  "reasoning": "Explanation..."\n}'
+            '{\n  "selected_source_ids": ["S4363608614"],\n  "doi_prefixes": ["10.1109/iros"],\n  "frequency": "biennial_even",\n  "reasoning": "Explanation..."\n}'
         )
 
         eff_short = short_name or venue
-        eff_search = search_term or venue
+        if isinstance(search_term, list):
+            eff_search = ", ".join(f"'{s}'" for s in search_term)
+        else:
+            eff_search = str(search_term or venue)
 
-        target_info = f"TARGET VENUE SHORT NAME: {eff_short}\nTARGET VENUE SEARCH TERM: {eff_search}"
+        target_info = f"TARGET VENUE SHORT NAME: {eff_short}\nTARGET VENUE SEARCH TERMS: {eff_search}"
 
         contents = [
             system_prompt,
@@ -419,11 +420,26 @@ class GeminiClient:
 
                 text_content = self._extract_response_text(response)
                 res_json = json.loads(text_content)
-                sel_id = res_json.get("selected_source_id", "")
-                if sel_id:
-                    sel_id = sel_id.split("/")[-1]
-                    logger.info(f"Gemini selected OpenAlex source ID '{sel_id}' for venue '{venue}' (Reasoning: {res_json.get('reasoning')})")
-                    return sel_id
+                
+                raw_ids = res_json.get("selected_source_ids") or res_json.get("selected_source_id") or []
+                if isinstance(raw_ids, str):
+                    raw_ids = [raw_ids]
+                source_ids = [str(x).split("/")[-1] for x in raw_ids if str(x).strip()]
+
+                raw_prefs = res_json.get("doi_prefixes") or res_json.get("doi_prefix") or []
+                if isinstance(raw_prefs, str):
+                    raw_prefs = [raw_prefs]
+                doi_prefixes = [str(x).strip().lower() for x in raw_prefs if str(x).strip()]
+
+                freq = str(res_json.get("frequency", "annual")).strip().lower()
+                if freq not in ["annual", "biennial_even", "biennial_odd", "irregular"]:
+                    freq = "annual"
+
+                logger.info(
+                    f"Gemini resolved source info for venue '{venue}': "
+                    f"source_ids={source_ids}, doi_prefixes={doi_prefixes}, frequency={freq} (Reasoning: {res_json.get('reasoning')})"
+                )
+                return {"source_ids": source_ids, "doi_prefixes": doi_prefixes, "frequency": freq}
             except Exception as e:
                 err_str = str(e)
                 is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
@@ -441,5 +457,23 @@ class GeminiClient:
                 if attempt < max_retries - 1:
                     time.sleep(sleep_time)
 
-        return None
+        return {"source_ids": [], "doi_prefixes": [], "frequency": "annual"}
+
+    def resolve_openalex_source(
+        self,
+        venue: str,
+        candidates: List[Dict[str, Any]],
+        short_name: Optional[str] = None,
+        search_term: Optional[str] = None,
+        max_retries: int = 10,
+    ) -> Optional[str]:
+        """
+        Backward compatible wrapper around resolve_openalex_venue_sources.
+        Returns the first resolved source ID string or None.
+        """
+        res = self.resolve_openalex_venue_sources(
+            venue, candidates, short_name=short_name, search_term=search_term, max_retries=max_retries
+        )
+        s_ids = res.get("source_ids", [])
+        return s_ids[0] if s_ids else None
 
