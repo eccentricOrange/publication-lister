@@ -3,10 +3,14 @@
 #   python3 main.py batch
 
 # List of target venues to harvest and analyze
+# Each venue can be specified as a string OR as an object with search_term and short_name
 venues:
-  - ICRA
-  - IROS
-  - CVPR
+  - search_term: "International Conference on Robotics and Automation"
+    short_name: ICRA
+  - search_term: "IEEE/RSJ International Conference on Intelligent Robots and Systems"
+    short_name: IROS
+  - search_term: "IEEE/CVF Conference on Computer Vision and Pattern Recognition"
+    short_name: CVPR
   - NEURIPS
 
 # Publication years (range or explicit list)
@@ -22,6 +26,3 @@ exceptions:
   - venue: IROS
     years: [2025]
     openalex_source_id: "S4363608614"
-  - venue: CVPR
-    search_term: "IEEE/CVF Conference on Computer Vision and Pattern Recognition"
-

@@ -82,10 +82,14 @@ The bulk execution pipeline is controlled via a YAML configuration file. By defa
 
 ```yaml
 # Target venues to harvest and analyze
+# Venues can be strings OR objects with search_term and short_name
 venues:
-  - ICRA
-  - IROS
-  - CVPR
+  - search_term: "IEEE/RSJ International Conference on Intelligent Robots and Systems"
+    short_name: IROS
+  - search_term: "International Conference on Robotics and Automation"
+    short_name: ICRA
+  - search_term: "IEEE/CVF Conference on Computer Vision and Pattern Recognition"
+    short_name: CVPR
   - NEURIPS
 
 # Publication years (range or explicit list)
@@ -101,26 +105,31 @@ exceptions:
   - venue: IROS
     years: [2025]
     openalex_source_id: "S4363608614"
-  - venue: CVPR
-    search_term: "IEEE/CVF Conference on Computer Vision and Pattern Recognition"
-  - venue: R-AL
-    doi_prefix: "10.1109/lra"
 ```
 
 ### YAML Parameter Reference
 
 | Parameter | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `venues` | List of Strings | **Yes** | — | List of target venue acronyms or names to harvest (e.g. `ICRA`, `IROS`, `T-RO`). |
+| `venues` | List of Strings / Objects | **Yes** | — | List of target venues. Items can be strings or objects with `search_term` and optional `short_name` (see venue object fields below). |
 | `years` | Mapping / List | **Yes** | — | Target publication years. Can be specified as a range (`start: 2017`, `end: 2026`) or as an explicit integer list (`[2021, 2022, 2023]`). |
 | `source` | String | No | `openalex` | Primary extraction data source. Supported values: `openalex`, `ieee`, `scopus`, `schedule`, `all`. |
 | `exceptions` | List of Objects | No | `[]` | List of venue-specific or year-specific override blocks (see below). |
+
+#### Venue Object Parameters
+
+| Field | Type | Required | Description |
+| :--- | :--- | :---: | :--- |
+| `search_term` | String | **Yes** | Full query term passed to OpenAlex Sources API or IEEE Xplore (e.g. `"IEEE/RSJ International Conference on Intelligent Robots and Systems"`). |
+| `short_name` | String | No | Clean short code used for folder/filename paths (e.g. `"IROS"`). If omitted, derived automatically from `search_term`. |
+| `openalex_source_id` | String | No | Optional explicit OpenAlex Source ID for this venue. |
+| `doi_prefix` | String | No | Optional explicit publisher DOI prefix for this venue. |
 
 #### Exception Block Parameters
 
 | Field | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
-| `venue` | String | **Yes** | The venue acronym or string to match against the `venues` list (case-insensitive). |
+| `venue` | String | **Yes** | The venue short code or name to match against (case-insensitive). |
 | `years` | List of Integers | No | Specific years to apply this override to. If omitted, applies to all years for this venue. |
 | `openalex_source_id` | String | No | Explicit OpenAlex Source ID (e.g. `"S4363608614"`). Bypasses OpenAlex Sources API resolution. |
 | `search_term` | String | No | Custom search query passed to OpenAlex Sources API or IEEE Xplore search. |

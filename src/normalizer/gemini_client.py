@@ -366,11 +366,14 @@ class GeminiClient:
         self,
         venue: str,
         candidates: List[Dict[str, Any]],
+        short_name: Optional[str] = None,
+        search_term: Optional[str] = None,
         max_retries: int = 3,
     ) -> Optional[str]:
         """
         Uses Gemini LLM to analyze candidate OpenAlex source records for a venue,
         and select the single best matching primary source ID (e.g. 'S4363608614').
+        Presents both short_name (e.g. 'IROS') and search_term (e.g. 'IEEE/RSJ International Conference...') to LLM.
         """
         if not candidates:
             return None
@@ -396,16 +399,21 @@ class GeminiClient:
 
         system_prompt = (
             "You are an expert academic publication metadata assistant.\n"
-            "Given a target academic conference or journal venue string (e.g. 'IROS' or 'ICRA') and a list of candidate OpenAlex source objects, "
-            "select the single best matching primary OpenAlex Source ID (e.g. 'S4363608614') that contains the publication works (works_count > 0).\n"
+            "Given a target academic conference or journal venue short name and search term, and a list of candidate OpenAlex source objects, "
+            "select the single best matching primary OpenAlex Source ID (e.g. 'S4363608614') that contains publication works (works_count > 0).\n"
             "Pick the candidate that represents the main conference/journal proceedings series.\n"
             "Output JSON format:\n"
             '{\n  "selected_source_id": "S4363608614",\n  "reasoning": "Explanation..."\n}'
         )
 
+        eff_short = short_name or venue
+        eff_search = search_term or venue
+
+        target_info = f"TARGET VENUE SHORT NAME: {eff_short}\nTARGET VENUE SEARCH TERM: {eff_search}"
+
         contents = [
             system_prompt,
-            f"TARGET VENUE: {venue}\nCANDIDATES:\n{json.dumps(cand_summaries, separators=(',', ':'), ensure_ascii=False)}",
+            f"{target_info}\nCANDIDATES:\n{json.dumps(cand_summaries, separators=(',', ':'), ensure_ascii=False)}",
         ]
 
         config = types.GenerateContentConfig(

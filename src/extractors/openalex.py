@@ -162,7 +162,12 @@ class OpenAlexExtractor(BaseExtractor):
             results = raw_results
 
         logger.info(f"Found {len(results)} candidate sources for '{venue_key}'. Invoking Gemini LLM to select best match...")
-        gemini_selected = self.gemini_client.resolve_openalex_source(venue_search_term, results)
+        gemini_selected = self.gemini_client.resolve_openalex_source(
+            venue_key,
+            results,
+            short_name=venue_key,
+            search_term=venue_search_term,
+        )
         if gemini_selected:
             source_id = gemini_selected
         elif len(results) == 1:

@@ -10,6 +10,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class VenueConfig:
+    search_term: str
+    short_name: str
+    openalex_source_id: Optional[str] = None
+    doi_prefix: Optional[str] = None
+    query_term: Optional[str] = None
+    source: Optional[str] = None
+
+
+@dataclass
 class VenueException:
     venue: str
     years: Optional[List[int]] = None
@@ -22,10 +32,15 @@ class VenueException:
 
 @dataclass
 class BatchConfig:
-    venues: List[str]
+    venue_configs: List[VenueConfig]
     years: List[int]
     default_source: str = "openalex"
     exceptions: List[VenueException] = field(default_factory=list)
+
+    @property
+    def venues(self) -> List[str]:
+        """Returns list of short_name strings for backward compatibility."""
+        return [v.short_name for v in self.venue_configs]
 
     @classmethod
     def from_file(cls, yaml_path: Path) -> "BatchConfig":
@@ -38,16 +53,38 @@ class BatchConfig:
             raw_data = yaml.safe_load(f) or {}
 
         # 1. Parse venues
-        venues_raw = raw_data.get("venues", [])
-        if isinstance(venues_raw, str):
-            venues = [venues_raw.strip()]
-        elif isinstance(venues_raw, list):
-            venues = [str(v).strip() for v in venues_raw if str(v).strip()]
-        else:
-            raise ValueError(f"Invalid 'venues' specified in {yaml_path}: {venues_raw}")
+        raw_venues = raw_data.get("venues", [])
+        venue_configs: List[VenueConfig] = []
 
-        if not venues:
-            raise ValueError(f"No venues specified in batch configuration {yaml_path}")
+        if isinstance(raw_venues, list):
+            for item in raw_venues:
+                if isinstance(item, str) and item.strip():
+                    st = item.strip()
+                    sn = sanitize_venue_name(st)
+                    venue_configs.append(VenueConfig(search_term=st, short_name=sn))
+                elif isinstance(item, dict):
+                    st = (item.get("search_term") or item.get("search") or item.get("name") or item.get("venue") or "").strip()
+                    if not st:
+                        continue
+                    sn_raw = (item.get("short_name") or item.get("short_code") or item.get("code") or item.get("short") or "").strip()
+                    sn = sanitize_venue_name(sn_raw) if sn_raw else sanitize_venue_name(st)
+                    venue_configs.append(
+                        VenueConfig(
+                            search_term=st,
+                            short_name=sn,
+                            openalex_source_id=item.get("openalex_source_id"),
+                            doi_prefix=item.get("doi_prefix"),
+                            query_term=item.get("query_term"),
+                            source=item.get("source"),
+                        )
+                    )
+        elif isinstance(raw_venues, str) and raw_venues.strip():
+            st = raw_venues.strip()
+            sn = sanitize_venue_name(st)
+            venue_configs.append(VenueConfig(search_term=st, short_name=sn))
+
+        if not venue_configs:
+            raise ValueError(f"No valid venues specified in batch configuration {yaml_path}")
 
         # 2. Parse years
         years_raw = raw_data.get("years", {})
@@ -93,17 +130,32 @@ class BatchConfig:
                     )
 
         return cls(
-            venues=venues,
+            venue_configs=venue_configs,
             years=years,
             default_source=default_source,
             exceptions=exceptions,
         )
 
     def get_overrides(self, venue: str, year: int) -> Dict[str, Any]:
-        """Returns merged override parameters for a specific venue and year."""
+        """Returns merged override parameters for a specific venue (by short_name or search_term) and year."""
         clean_target = sanitize_venue_name(venue)
         merged: Dict[str, Any] = {"source": self.default_source}
 
+        # 1. Base configuration from VenueConfig
+        for v_cfg in self.venue_configs:
+            if v_cfg.short_name == clean_target or sanitize_venue_name(v_cfg.search_term) == clean_target:
+                merged["search_term"] = v_cfg.search_term
+                if v_cfg.source:
+                    merged["source"] = v_cfg.source.lower()
+                if v_cfg.openalex_source_id:
+                    merged["openalex_source_id"] = v_cfg.openalex_source_id
+                if v_cfg.doi_prefix:
+                    merged["doi_prefix"] = v_cfg.doi_prefix
+                if v_cfg.query_term:
+                    merged["query_term"] = v_cfg.query_term
+                break
+
+        # 2. Exceptions override
         for ex in self.exceptions:
             clean_ex = sanitize_venue_name(ex.venue)
             if clean_ex == clean_target or ex.venue.upper() == venue.upper():

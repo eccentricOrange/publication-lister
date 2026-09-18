@@ -17,7 +17,6 @@ class TestBatchRunner(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_parse_batch_yaml_example(self):
-        example_yaml = Path("batch.yaml.example")
         example_yaml = Path("batch.example.yaml")
         self.assertTrue(example_yaml.exists())
 
@@ -63,6 +62,27 @@ exceptions:
         
         icra_2024_overrides = config.get_overrides("ICRA", 2024)
         self.assertEqual(icra_2024_overrides.get("doi_prefix"), "10.1109/icra")
+
+    def test_object_venue_parsing(self):
+        custom_yaml = self.root_path / "object_venues_batch.yaml"
+        content = """
+venues:
+  - search_term: "IEEE/RSJ International Conference on Intelligent Robots and Systems"
+    short_name: IROS
+  - search_term: "International Conference on Robotics and Automation"
+    short_name: ICRA
+years: [2024]
+source: openalex
+"""
+        with open(custom_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        config = BatchConfig.from_file(custom_yaml)
+        self.assertEqual(config.venues, ["IROS", "ICRA"])
+        iros_overrides = config.get_overrides("IROS", 2024)
+        self.assertEqual(iros_overrides.get("search_term"), "IEEE/RSJ International Conference on Intelligent Robots and Systems")
+        icra_overrides = config.get_overrides("ICRA", 2024)
+        self.assertEqual(icra_overrides.get("search_term"), "International Conference on Robotics and Automation")
 
 
 if __name__ == "__main__":
