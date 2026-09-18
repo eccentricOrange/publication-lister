@@ -4,6 +4,8 @@ from pathlib import Path
 # Base Directory of the Project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+from dotenv import load_dotenv
+
 # Load environment variables from .env file if present
 try:
     from dotenv import load_dotenv
@@ -17,6 +19,7 @@ except ImportError:
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 # API Keys & Credentials
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")

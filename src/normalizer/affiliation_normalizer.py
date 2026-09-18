@@ -15,6 +15,7 @@ class AffiliationNormalizer:
     Normalizes raw paper affiliations against canonical organization registry.
     Uses local registry search first, and queries Gemini API for novel strings.
     Applies within-paper deduplication and updates central canonical registry.
+    Integrates Gemini Server-Side Context Caching (cachedContents) and local double-checking.
     """
 
     def __init__(
@@ -134,9 +135,28 @@ class AffiliationNormalizer:
             
             return artifact
 
+        # Initialize server-side context cache if unresolved strings exist
+        cached_content_id: Optional[str] = None
+        if unresolved_strings and self.gemini_client.api_key:
+            try:
+                full_registry_summary = [
+                    {
+                        "canonical_id": e["canonical_id"],
+                        "canonical_name": e["canonical_name"],
+                        "entity_type": e["entity_type"],
+                        "known_aliases": e.get("known_aliases", []),
+                    }
+                    for e in self.registry.entries
+                ]
+                cached_content_id = self.gemini_client.create_cached_context(full_registry_summary)
+            except Exception as exc:
+                logger.warning(f"Failed creating Gemini server-side context cache: {exc}. Proceeding with inline prompt context.")
+
+        new_orgs_since_cache_sync = 0
+
         # Step 2: Batch unresolved strings and query Gemini API
         while unresolved_strings:
-            # Re-check remaining unresolved strings against updated registry
+            # Re-check remaining unresolved strings against updated local registry
             still_unresolved = []
             newly_matched_count = 0
             for raw_str in unresolved_strings:
@@ -168,13 +188,18 @@ class AffiliationNormalizer:
 
             batch, registry_summary = self.gemini_client.calculate_dynamic_batch(
                 unresolved_strings,
-                full_registry_summary,
+                full_registry_summary if not cached_content_id else None,
+                target_batch_size=batch_size if cached_content_id else 50,
             )
 
-            logger.info(f"Querying Gemini API for dynamic batch of {len(batch)} unresolved strings ({len(string_to_canonical_id)} resolved locally so far, {len(unresolved_strings)} remaining)")
+            logger.info(f"Querying Gemini API for batch of {len(batch)} unresolved strings (Cached Context: {cached_content_id or 'None'}, {len(string_to_canonical_id)} resolved locally, {len(unresolved_strings)} remaining)")
 
             try:
-                resolutions = self.gemini_client.normalize_batch(batch, registry_summary)
+                resolutions = self.gemini_client.normalize_batch(
+                    batch,
+                    cached_content=cached_content_id,
+                    canonical_registry_summary=registry_summary if not cached_content_id else None,
+                )
             except Exception as e:
                 logger.error(f"Failed batch normalization with Gemini API: {e}", exc_info=True)
                 _save_checkpoint(completed=False)
@@ -195,7 +220,14 @@ class AffiliationNormalizer:
                         string_to_canonical_id[raw_str] = c_id
                         continue
 
-                    c_name = res.get("canonical_name") or raw_str.strip()
+                    c_name = (res.get("canonical_name") or raw_str).strip()
+                    
+                    # Double-check local registry before registering new entity (prevents duplicates across cached calls)
+                    match = self.registry.find_by_string(c_name) or self.registry.find_by_string(raw_str.strip())
+                    if match:
+                        string_to_canonical_id[raw_str] = match["canonical_id"]
+                        continue
+
                     e_type = res.get("entity_type") or "UNI"
                     new_entry = self.registry.register_organization(
                         canonical_name=c_name,
@@ -203,15 +235,38 @@ class AffiliationNormalizer:
                         known_aliases=[raw_str.strip()],
                     )
                     string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+                    new_orgs_since_cache_sync += 1
                 else:
-                    # Fallback if LLM omitted key: register raw string directly as canonical
-                    new_entry = self.registry.register_organization(
-                        canonical_name=raw_str.strip(),
-                        entity_type="UNI",
-                        known_aliases=[raw_str.strip()],
-                    )
-                    string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+                    # Fallback if LLM omitted key: double check local registry or register raw string
+                    match = self.registry.find_by_string(raw_str.strip())
+                    if match:
+                        string_to_canonical_id[raw_str] = match["canonical_id"]
+                    else:
+                        new_entry = self.registry.register_organization(
+                            canonical_name=raw_str.strip(),
+                            entity_type="UNI",
+                            known_aliases=[raw_str.strip()],
+                        )
+                        string_to_canonical_id[raw_str] = new_entry["canonical_id"]
+                        new_orgs_since_cache_sync += 1
             
+            # Re-sync server-side context cache if local registry has grown significantly (>50 new entities)
+            if cached_content_id and new_orgs_since_cache_sync >= 50:
+                try:
+                    updated_registry_summary = [
+                        {
+                            "canonical_id": e["canonical_id"],
+                            "canonical_name": e["canonical_name"],
+                            "entity_type": e["entity_type"],
+                            "known_aliases": e.get("known_aliases", []),
+                        }
+                        for e in self.registry.entries
+                    ]
+                    cached_content_id = self.gemini_client.create_cached_context(updated_registry_summary)
+                    new_orgs_since_cache_sync = 0
+                except Exception as exc:
+                    logger.warning(f"Could not re-sync Gemini server-side context cache: {exc}")
+
             # Checkpoint after each batch
             _save_checkpoint(completed=False)
 
@@ -238,4 +293,3 @@ class AffiliationNormalizer:
         final_artifact = _save_checkpoint(completed=True, normalized_papers_list=normalized_papers)
         logger.info(f"Successfully completed and saved normalized dataset to {norm_path}")
         return final_artifact
-
