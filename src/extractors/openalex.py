@@ -20,13 +20,47 @@ OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_SOURCES_URL = "https://api.openalex.org/sources"
 
 
+DEFAULT_DOI_PREFIXES: Dict[str, str] = {
+    "ICRA": "10.1109/icra",
+    "IROS": "10.1109/iros",
+    "CVPR": "10.1109/cvpr",
+    "RA-L": "10.1109/lra",
+    "R-AL": "10.1109/lra",
+    "RAL": "10.1109/lra",
+    "TRO": "10.1109/tro",
+    "T-RO": "10.1109/tro",
+}
+def derive_doi_prefix(venue_str: str, explicit_prefix: Optional[str] = None) -> Optional[str]:
+    """
+    Derives DOI prefix dynamically from explicit parameter or venue name string in YAML.
+    - If explicit_prefix is provided, returns explicit_prefix.
+    - Extracts short tag/acronym from venue_str (e.g. 'ICRA (International...)' -> 'ICRA').
+    - Cleans non-alphanumeric characters (e.g. 'T-RO' -> 'tro', 'R-AL' -> 'ral', 'ICRA' -> 'icra').
+    - Constructs '10.1109/{clean_tag}' as candidate IEEE DOI prefix.
+    """
+    if explicit_prefix and str(explicit_prefix).strip():
+        return str(explicit_prefix).strip()
+
+    if not venue_str:
+        return None
+
+    # Extract short tag (part before parentheses if present)
+    raw_tag = venue_str.split("(")[0].strip()
+    clean_tag = "".join(c.lower() for c in raw_tag if c.isalnum())
+    if not clean_tag:
+        return None
+
+    return f"10.1109/{clean_tag}"
+
+
 class OpenAlexExtractor(BaseExtractor):
     """
     OpenAlex REST API extractor implementation.
     Harvests publication metadata and institutional affiliations using exact Source IDs or DOI prefixes.
     - Resolves OpenAlex Source ID via Sources API + Gemini LLM if un-cached.
     - Caches source IDs in data/openalex_sources_cache.json.
-    - Queries Works API using primary_location.source.id, fallback to doi_starts_with or search, with field selection.
+    - Queries Works API using primary_location.source.id or doi_starts_with (never unconstrained raw text search).
+    - Queries Works API using primary_location.source.id or dynamically derived doi_starts_with.
     - Supports deterministic pause-and-resume via cursor tokens.
     """
 
@@ -74,6 +108,7 @@ class OpenAlexExtractor(BaseExtractor):
         """
         Resolves OpenAlex Source ID for a given venue abbreviation or full name.
         Uses explicit openalex_source_id if provided; otherwise checks local cache or queries OpenAlex Sources API.
+        All candidate results from OpenAlex Sources API are evaluated by Gemini LLM.
         """
         venue_upper = venue.upper()
 
@@ -124,19 +159,18 @@ class OpenAlexExtractor(BaseExtractor):
         if not results:
             results = raw_results
 
-        if len(results) == 1:
+        logger.info(f"Found {len(results)} candidate sources for '{venue_upper}'. Invoking Gemini LLM to select best match...")
+        gemini_selected = self.gemini_client.resolve_openalex_source(venue_search_term, results)
+        if gemini_selected:
+            source_id = gemini_selected
+        elif len(results) == 1:
             raw_id = results[0].get("id", "")
             source_id = raw_id.split("/")[-1]
-            logger.info(f"Single candidate found. Resolved OpenAlex Source ID for '{venue_upper}': {source_id}")
+            logger.info(f"Fallback: using single candidate source ID '{source_id}' for '{venue_upper}'")
         else:
-            logger.info(f"Found {len(results)} candidate sources for '{venue_upper}'. Invoking Gemini LLM to select best match...")
-            gemini_selected = self.gemini_client.resolve_openalex_source(venue_search_term, results)
-            if gemini_selected:
-                source_id = gemini_selected
-            else:
-                best_cand = max(results, key=lambda x: x.get("works_count", 0))
-                source_id = best_cand.get("id", "").split("/")[-1]
-                logger.info(f"Fallback selected source ID '{source_id}' ({best_cand.get('display_name')}) with max works_count={best_cand.get('works_count')}")
+            best_cand = max(results, key=lambda x: x.get("works_count", 0))
+            source_id = best_cand.get("id", "").split("/")[-1]
+            logger.info(f"Fallback selected source ID '{source_id}' ({best_cand.get('display_name')}) with max works_count={best_cand.get('works_count')}")
 
         cache[venue_upper] = source_id
         self._save_sources_cache(cache)
@@ -154,8 +188,17 @@ class OpenAlexExtractor(BaseExtractor):
     ) -> Dict[str, Any]:
         """
         Determines optimal filter parameters for OpenAlex Works API.
-        Tries primary_location.source.id first; if 0 results returned, falls back to doi_starts_with or search.
+        Tries primary_location.source.id first; if 0 results returned, falls back to doi_starts_with.
+        Tries primary_location.source.id first; if 0 results returned, falls back to dynamically derived doi_starts_with.
+        STRICT REQUIREMENT: Never falls back to unconstrained raw text search ('search: {venue}').
         """
+        effective_doi_prefix = doi_prefix or DEFAULT_DOI_PREFIXES.get(venue_upper)
+        if not effective_doi_prefix:
+            # Try cleaning venue name (e.g., 'T-RO' -> 'TRO', 'R-AL' -> 'RAL')
+            clean_key = venue_upper.replace(" ", "").replace("-", "").replace("_", "")
+            effective_doi_prefix = DEFAULT_DOI_PREFIXES.get(clean_key)
+        effective_doi_prefix = derive_doi_prefix(venue_upper, explicit_prefix=doi_prefix)
+
         test_filter = f"publication_year:{year},primary_location.source.id:{source_id}"
         test_params: Dict[str, Any] = {
             "filter": test_filter,
@@ -174,12 +217,13 @@ class OpenAlexExtractor(BaseExtractor):
                 if cnt > 0:
                     logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: primary_location.source.id:{source_id} (count={cnt})")
                     return {"filter": test_filter}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed testing primary_location.source.id filter for {venue_upper} {year}: {e}")
 
         # Fallback 1: doi_starts_with
-        if doi_prefix:
-            doi_filter = f"publication_year:{year},doi_starts_with:{doi_prefix}"
+        # Fallback 1: doi_starts_with (derived dynamically from venue string or explicit config)
+        if effective_doi_prefix:
+            doi_filter = f"publication_year:{year},doi_starts_with:{effective_doi_prefix}"
             test_params["filter"] = doi_filter
             self.enforce_pacing()
             try:
@@ -187,15 +231,23 @@ class OpenAlexExtractor(BaseExtractor):
                 if res.status_code == 200:
                     cnt = res.json().get("meta", {}).get("count", 0)
                     if cnt > 0:
-                        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: doi_starts_with:{doi_prefix} (count={cnt})")
+                        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: doi_starts_with:{effective_doi_prefix} (count={cnt})")
                         return {"filter": doi_filter}
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed testing doi_starts_with filter for {venue_upper} {year}: {e}")
 
-        # Fallback 2: text search
-        venue_name = search_term or venue_upper
-        logger.info(f"OpenAlex filter strategy for {venue_upper} {year}: publication_year:{year} with search='{venue_name}'")
-        return {"filter": f"publication_year:{year}", "search": venue_name}
+        # Strict: If count is 0 for both source_id and doi_starts_with, DO NOT fall back to unconstrained raw text search.
+        if effective_doi_prefix:
+            fallback_filter = f"publication_year:{year},doi_starts_with:{effective_doi_prefix}"
+        else:
+            fallback_filter = f"publication_year:{year},primary_location.source.id:{source_id}"
+
+        logger.warning(
+            f"No OpenAlex works found for {venue_upper} {year} with source ID '{source_id}' or DOI prefix '{effective_doi_prefix}'. "
+            f"No OpenAlex works found for {venue_upper} {year} with source ID '{source_id}' or derived DOI prefix '{effective_doi_prefix}'. "
+            f"Using filter '{fallback_filter}' (count=0) to prevent unconstrained raw search corruption."
+        )
+        return {"filter": fallback_filter}
 
     def extract(
         self,

@@ -18,6 +18,7 @@ class TestBatchRunner(unittest.TestCase):
 
     def test_parse_batch_yaml_example(self):
         example_yaml = Path("batch.yaml.example")
+        example_yaml = Path("batch.example.yaml")
         self.assertTrue(example_yaml.exists())
 
         config = BatchConfig.from_file(example_yaml)
