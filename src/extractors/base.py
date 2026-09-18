@@ -8,34 +8,35 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from src.config import RAW_DATA_DIR
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger(__name__)
 
 
 class BaseExtractor(ABC):
     """
-    Base Extractor interface for publication venue data sources.
-    Handles network sessions, rate-limit header parsing, pause & resume state,
-    caching raw files under data/raw/<venue>/<venue>_<year>.json,
-    and frequency aggregation.
+    Abstract Base Class for all paper metadata extractors.
+    Provides uniform raw JSON artifact disk caching, pause/resume checkpointing,
+    and automatic HTTP rate limit header inspection.
     """
 
-    def __init__(self, output_dir: Path = RAW_DATA_DIR):
+    def __init__(self, output_dir: Path = RAW_DATA_DIR, session: Optional[requests.Session] = None):
         self.output_dir = output_dir
-        self.session = requests.Session()
-        self.rate_limit_delay_seconds: float = 0.0
         self.rate_limit_detected: Optional[int] = None
+        self.session = session or requests.Session()
+        self.rate_limit_delay_seconds = 0.0
 
     def inspect_rate_limit_headers(self, response: requests.Response) -> None:
-        """
-        Inspects response headers on initial query to set pacing limit throughout execution run.
-        """
+        """Inspects HTTP response headers for rate limit info on initial request."""
+        if self.rate_limit_delay_seconds > 0:
+            return
+
         headers = response.headers
         limit_val = None
-        for key in ["x-ratelimit-limit", "ratelimit-limit", "x-rate-limit-limit", "X-RateLimit-Limit"]:
+        for key in ["X-RateLimit-Limit", "X-Rate-Limit-Limit", "x-ratelimit-limit-requests"]:
             if key in headers:
                 try:
-                    limit_val = int(headers[key])
+                    limit_val = float(headers[key])
                     break
                 except ValueError:
                     pass
@@ -56,10 +57,11 @@ class BaseExtractor(ABC):
             time.sleep(self.rate_limit_delay_seconds)
 
     def get_raw_file_path(self, venue: str, year: int) -> Path:
-        """Returns standard raw file path data/raw/<venue>/<venue>_<year>.json."""
-        venue_dir = self.output_dir / venue.upper()
+        """Returns standard raw file path data/raw/<sanitized_venue>/<sanitized_venue>_<year>.json."""
+        clean_venue = sanitize_venue_name(venue)
+        venue_dir = self.output_dir / clean_venue
         venue_dir.mkdir(parents=True, exist_ok=True)
-        return venue_dir / f"{venue.upper()}_{year}.json"
+        return venue_dir / f"{clean_venue}_{year}.json"
 
     def is_cached(self, venue: str, year: int) -> bool:
         """Checks if raw data file already exists and is marked completed."""

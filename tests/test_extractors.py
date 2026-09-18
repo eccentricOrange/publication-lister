@@ -1,7 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
+
 from src.extractors.base import BaseExtractor
+from src.extractors.openalex import OpenAlexExtractor, derive_doi_prefix
+from src.utils import sanitize_venue_name
 
 
 class DummyExtractor(BaseExtractor):
@@ -44,7 +48,6 @@ class TestExtractors(unittest.TestCase):
             self.assertEqual(res2["total_papers"], 2)
 
     def test_openalex_sources_cache(self):
-        from src.extractors.openalex import OpenAlexExtractor
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "openalex_sources_cache.json"
             extractor = OpenAlexExtractor(api_key="dummy", mailto="test@example.com", sources_cache_path=cache_path)
@@ -55,8 +58,6 @@ class TestExtractors(unittest.TestCase):
             self.assertEqual(resolved_id, "S4363608614")
 
     def test_openalex_filter_no_search_fallback(self):
-        from unittest.mock import MagicMock
-        from src.extractors.openalex import OpenAlexExtractor
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "openalex_sources_cache.json"
             extractor = OpenAlexExtractor(api_key="dummy", mailto="test@example.com", sources_cache_path=cache_path)
@@ -73,14 +74,18 @@ class TestExtractors(unittest.TestCase):
             self.assertIn("doi_starts_with:10.1109/icra", params["filter"])
 
     def test_derive_doi_prefix(self):
-        from src.extractors.openalex import derive_doi_prefix
         self.assertEqual(derive_doi_prefix("ICRA"), "10.1109/icra")
         self.assertEqual(derive_doi_prefix("ICRA (International Conference...)"), "10.1109/icra")
         self.assertEqual(derive_doi_prefix("T-RO (IEEE Transactions on Robotics)"), "10.1109/tro")
         self.assertEqual(derive_doi_prefix("R-AL (IEEE Robotics...)"), "10.1109/ral")
         self.assertEqual(derive_doi_prefix("R-AL", explicit_prefix="10.1109/lra"), "10.1109/lra")
 
+    def test_sanitize_venue_name(self):
+        self.assertEqual(sanitize_venue_name("IROS (IEEE/RSJ International Conference on Intelligent Robots and Systems)"), "IROS")
+        self.assertEqual(sanitize_venue_name("ICRA (International Conference on Robotics and Automation)"), "ICRA")
+        self.assertEqual(sanitize_venue_name("T-RO (IEEE Transactions on Robotics)"), "T-RO")
+        self.assertEqual(sanitize_venue_name("IEEE/RSJ"), "IEEE_RSJ")
+
 
 if __name__ == "__main__":
     unittest.main()
-

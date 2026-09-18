@@ -13,6 +13,7 @@ from src.config import (
 )
 from src.extractors.base import BaseExtractor
 from src.normalizer.gemini_client import GeminiClient
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ DEFAULT_DOI_PREFIXES: Dict[str, str] = {
     "TRO": "10.1109/tro",
     "T-RO": "10.1109/tro",
 }
+
 def derive_doi_prefix(venue_str: str, explicit_prefix: Optional[str] = None) -> Optional[str]:
     """
     Derives DOI prefix dynamically from explicit parameter or venue name string in YAML.
@@ -110,24 +112,24 @@ class OpenAlexExtractor(BaseExtractor):
         Uses explicit openalex_source_id if provided; otherwise checks local cache or queries OpenAlex Sources API.
         All candidate results from OpenAlex Sources API are evaluated by Gemini LLM.
         """
-        venue_upper = venue.upper()
+        venue_key = sanitize_venue_name(venue)
 
         if openalex_source_id:
             clean_id = openalex_source_id.split("/")[-1]
-            logger.info(f"Using explicitly configured OpenAlex Source ID for venue '{venue_upper}': {clean_id}")
+            logger.info(f"Using explicitly configured OpenAlex Source ID for venue '{venue_key}': {clean_id}")
             cache = self._load_sources_cache()
-            cache[venue_upper] = clean_id
+            cache[venue_key] = clean_id
             self._save_sources_cache(cache)
             return clean_id
 
         cache = self._load_sources_cache()
-        if venue_upper in cache:
-            cached_id = cache[venue_upper]
-            logger.info(f"Using cached OpenAlex Source ID for venue '{venue_upper}': {cached_id}")
+        if venue_key in cache:
+            cached_id = cache[venue_key]
+            logger.info(f"Using cached OpenAlex Source ID for venue '{venue_key}': {cached_id}")
             return cached_id
 
-        venue_search_term = search_term or venue_upper
-        logger.info(f"Resolving OpenAlex Source ID for venue '{venue_upper}' ('{venue_search_term}') via Sources API...")
+        venue_search_term = search_term or venue
+        logger.info(f"Resolving OpenAlex Source ID for venue '{venue_key}' ('{venue_search_term}') via Sources API...")
 
         headers: Dict[str, str] = {}
         if self.api_key:
@@ -159,22 +161,22 @@ class OpenAlexExtractor(BaseExtractor):
         if not results:
             results = raw_results
 
-        logger.info(f"Found {len(results)} candidate sources for '{venue_upper}'. Invoking Gemini LLM to select best match...")
+        logger.info(f"Found {len(results)} candidate sources for '{venue_key}'. Invoking Gemini LLM to select best match...")
         gemini_selected = self.gemini_client.resolve_openalex_source(venue_search_term, results)
         if gemini_selected:
             source_id = gemini_selected
         elif len(results) == 1:
             raw_id = results[0].get("id", "")
             source_id = raw_id.split("/")[-1]
-            logger.info(f"Fallback: using single candidate source ID '{source_id}' for '{venue_upper}'")
+            logger.info(f"Fallback: using single candidate source ID '{source_id}' for '{venue_key}'")
         else:
             best_cand = max(results, key=lambda x: x.get("works_count", 0))
             source_id = best_cand.get("id", "").split("/")[-1]
             logger.info(f"Fallback selected source ID '{source_id}' ({best_cand.get('display_name')}) with max works_count={best_cand.get('works_count')}")
 
-        cache[venue_upper] = source_id
+        cache[venue_key] = source_id
         self._save_sources_cache(cache)
-        logger.info(f"Successfully cached OpenAlex Source ID for venue '{venue_upper}': {source_id}")
+        logger.info(f"Successfully cached OpenAlex Source ID for venue '{venue_key}': {source_id}")
         return source_id
 
     def _determine_filter_params(

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from src.config import NORMALIZED_DATA_DIR, OUTPUT_DATA_DIR
 from src.registry.organization_registry import OrganizationRegistry
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +38,26 @@ class MatrixExporter:
         output_path: Optional[Path] = None,
     ) -> Path:
         venue_upper = venue.upper()
+        clean_venue = sanitize_venue_name(venue)
         years = list(range(start_year, end_year + 1))
 
         if not output_path:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             output_path = self.output_dir / f"{venue_upper}_affiliations_{start_year}_{end_year}.csv"
+            output_path = self.output_dir / f"{clean_venue}_affiliations_{start_year}_{end_year}.csv"
 
         logger.info(f"Aggregating matrix for {venue_upper} across years {start_year}..{end_year}")
+        logger.info(f"Aggregating matrix for {clean_venue} across years {start_year}..{end_year}")
 
         # Data structure: canonical_id -> year -> count
         counts: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
 
         for y in years:
             norm_file = self.normalized_dir / f"{venue_upper}_{y}_normalized.json"
+            norm_file = self.normalized_dir / f"{clean_venue}_{y}_normalized.json"
             if not norm_file.exists():
                 err_msg = f"Normalized data file for {venue_upper} {y} not found at {norm_file}. Run normalize subcommand first."
+                err_msg = f"Normalized data file for {clean_venue} {y} not found at {norm_file}. Run normalize subcommand first."
                 logger.error(err_msg, exc_info=True)
                 raise FileNotFoundError(err_msg)
 
@@ -65,6 +71,7 @@ class MatrixExporter:
 
             papers = data.get("papers", [])
             logger.info(f"Processing {len(papers)} normalized papers for {venue_upper} {y}")
+            logger.info(f"Processing {len(papers)} normalized papers for {clean_venue} {y}")
 
             for p in papers:
                 # canonical_ids is already deduplicated per paper by AffiliationNormalizer

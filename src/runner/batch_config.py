@@ -1,8 +1,10 @@
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 import yaml
+
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +40,9 @@ class BatchConfig:
         # 1. Parse venues
         venues_raw = raw_data.get("venues", [])
         if isinstance(venues_raw, str):
-            venues = [venues_raw.upper()]
+            venues = [venues_raw.strip()]
         elif isinstance(venues_raw, list):
-            venues = [str(v).strip().upper() for v in venues_raw if v]
+            venues = [str(v).strip() for v in venues_raw if str(v).strip()]
         else:
             raise ValueError(f"Invalid 'venues' specified in {yaml_path}: {venues_raw}")
 
@@ -69,10 +71,8 @@ class BatchConfig:
         exceptions: List[VenueException] = []
         if isinstance(exceptions_raw, list):
             for item in exceptions_raw:
-                if isinstance(item, dict):
-                    ex_venue = str(item.get("venue", "")).upper()
-                    if not ex_venue:
-                        continue
+                if isinstance(item, dict) and "venue" in item:
+                    ex_venue = str(item["venue"]).strip()
                     ex_years_raw = item.get("years")
                     ex_years = None
                     if isinstance(ex_years_raw, list):
@@ -101,11 +101,12 @@ class BatchConfig:
 
     def get_overrides(self, venue: str, year: int) -> Dict[str, Any]:
         """Returns merged override parameters for a specific venue and year."""
-        venue_upper = venue.upper()
+        clean_target = sanitize_venue_name(venue)
         merged: Dict[str, Any] = {"source": self.default_source}
 
         for ex in self.exceptions:
-            if ex.venue == venue_upper:
+            clean_ex = sanitize_venue_name(ex.venue)
+            if clean_ex == clean_target or ex.venue.upper() == venue.upper():
                 if ex.years is None or year in ex.years:
                     if ex.source:
                         merged["source"] = ex.source.lower()
@@ -119,4 +120,3 @@ class BatchConfig:
                         merged["query_term"] = ex.query_term
 
         return merged
-

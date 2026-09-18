@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set
 from src.config import NORMALIZED_DATA_DIR, RAW_DATA_DIR
 from src.normalizer.gemini_client import GeminiClient
 from src.registry.organization_registry import OrganizationRegistry
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,11 @@ class AffiliationNormalizer:
 
     def get_normalized_file_path(self, venue: str, year: int) -> Path:
         """Returns standard normalized path data/normalized/<venue>_<year>_normalized.json."""
+        """Returns standard normalized path data/normalized/<sanitized_venue>_<year>_normalized.json."""
         self.normalized_dir.mkdir(parents=True, exist_ok=True)
         return self.normalized_dir / f"{venue.upper()}_{year}_normalized.json"
+        clean_venue = sanitize_venue_name(venue)
+        return self.normalized_dir / f"{clean_venue}_{year}_normalized.json"
 
     def normalize_venue_year(
         self,
