@@ -153,7 +153,19 @@ class TestNormalizerAndExporter(unittest.TestCase):
         extractor.append_raw_batch("ICRA", 2022, [], completed=True)
         self.assertTrue(extractor.is_cached("ICRA", 2022))
 
+    def test_gemini_client_retry_configuration(self):
+        from src.normalizer.gemini_client import GeminiClient
+        client = GeminiClient(api_key="dummy_key_for_testing")
+        genai_client = client.client
+        self.assertIsNotNone(genai_client._api_client._http_options)
+        retry_opts = genai_client._api_client._http_options.retry_options
+        self.assertIsNotNone(retry_opts)
+        self.assertEqual(retry_opts.attempts, 10)
+        self.assertIn(503, retry_opts.http_status_codes)
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

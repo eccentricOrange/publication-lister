@@ -75,11 +75,22 @@ class GeminiClient:
                 err_msg = "GEMINI_API_KEY is missing. Cannot initialize Gemini Client."
                 logger.error(err_msg, exc_info=True)
                 raise ValueError(err_msg)
-            # Use 120-second timeout (120,000 ms) via native HttpOptions
+            # Use 120-second timeout (120,000 ms) and native HttpRetryOptions with exponential backoff for 503 and transient errors
             self._client = genai.Client(
                 api_key=self.api_key,
-                http_options=types.HttpOptions(timeout=120_000),
+                http_options=types.HttpOptions(
+                    timeout=120_000,
+                    retry_options=types.HttpRetryOptions(
+                        attempts=15,
+                        initial_delay=15.0,
+                        max_delay=300.0,
+                        exp_base=2.0,
+                        http_status_codes=[503, 500, 502, 504, 429, 408],
+                    ),
+
+                ),
             )
+
         return self._client
 
     def _inspect_headers(self, headers: Any) -> None:
@@ -151,33 +162,6 @@ class GeminiClient:
             lines.append(f"{c_id}|{c_name}|{e_type}|{aliases}")
         return lines
 
-    def create_cached_context(
-        self,
-        canonical_registry_summary: List[Dict[str, Any]],
-        ttl_minutes: int = 60,
-    ) -> str:
-        """
-        Creates a server-side cachedContent resource storing the full canonical registry context.
-        Returns the cache resource name (e.g. 'cachedContents/123456789').
-        """
-        pipe_lines = self._format_registry_pipe_delimited(canonical_registry_summary)
-        registry_text = "\n".join(pipe_lines)
-        
-        cache_config = types.CreateCachedContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            contents=[f"CANONICAL ORGANIZATIONS REGISTRY:\n{registry_text}"],
-            ttl=f"{ttl_minutes * 60}s",
-            display_name="canonical_org_registry",
-        )
-        
-        logger.info(f"Creating Gemini server-side context cache for {len(canonical_registry_summary)} canonical entities (TTL: {ttl_minutes}m)...")
-        cache = self.client.caches.create(
-            model=GEMINI_MODEL,
-            config=cache_config,
-        )
-        logger.info(f"Successfully created Gemini server-side context cache: {cache.name}")
-        return cache.name
-
     def calculate_dynamic_batch(
         self,
         unresolved_strings: List[str],
@@ -186,17 +170,12 @@ class GeminiClient:
     ) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
         Calculates unresolved strings batch for LLM query.
-        When inline context is used, prunes registry using pipe-delimited formatting to stay under token limits.
-        When server-side cached context is used, returns up to target_batch_size without inline registry.
+        Prunes registry using pipe-delimited formatting to stay under token limits.
         """
         if not unresolved_strings:
             return [], []
 
-        if not canonical_registry_summary:
-            batch = unresolved_strings[:max(50, target_batch_size)]
-            logger.info(f"Selected batch of {len(batch)} unresolved affiliation strings for Gemini LLM query (Cached Context active).")
-            return batch, []
-
+        registry_summary = canonical_registry_summary or []
         target_tokens_per_req = 8000
         generic_stopwords = {
             "university", "college", "institute", "school", "department", "center", "centre", 
@@ -214,10 +193,10 @@ class GeminiClient:
                     keywords.add(w)
 
         pruned_registry = []
-        if len(canonical_registry_summary) <= 120:
-            pruned_registry = canonical_registry_summary
+        if len(registry_summary) <= 120:
+            pruned_registry = registry_summary
         else:
-            for e in canonical_registry_summary:
+            for e in registry_summary:
                 c_name = e.get("canonical_name", "").lower()
                 aliases = " ".join(e.get("known_aliases", [])).lower()
                 if any(w in c_name or w in aliases for w in keywords):
@@ -227,7 +206,7 @@ class GeminiClient:
 
             if len(pruned_registry) < 50:
                 seen_ids = {e["canonical_id"] for e in pruned_registry}
-                for e in canonical_registry_summary[:120]:
+                for e in registry_summary[:120]:
                     if e["canonical_id"] not in seen_ids:
                         pruned_registry.append(e)
                     if len(pruned_registry) >= 120:
@@ -249,7 +228,6 @@ class GeminiClient:
     def normalize_batch(
         self,
         raw_strings: List[str],
-        cached_content: Optional[str] = None,
         canonical_registry_summary: Optional[List[Dict[str, Any]]] = None,
         max_retries: int = 10,
     ) -> Dict[str, Dict[str, Any]]:
@@ -260,30 +238,21 @@ class GeminiClient:
         if not raw_strings:
             return {}
 
-        if cached_content:
-            prompt_payload = {"raw_affiliation_strings": raw_strings}
-            contents = f"INPUT PAYLOAD:\n{json.dumps(prompt_payload, separators=(',', ':'), ensure_ascii=False)}"
-            config = types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                should_return_http_response=True,
-                cached_content=cached_content,
-            )
-        else:
-            pipe_registry = self._format_registry_pipe_delimited(canonical_registry_summary or [])
-            prompt_payload = {
-                "existing_canonical_organizations": pipe_registry,
-                "raw_affiliation_strings": raw_strings,
-            }
-            contents = [
-                SYSTEM_PROMPT,
-                f"INPUT PAYLOAD:\n{json.dumps(prompt_payload, separators=(',', ':'), ensure_ascii=False)}",
-            ]
-            config = types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                should_return_http_response=True,
-            )
+        pipe_registry = self._format_registry_pipe_delimited(canonical_registry_summary or [])
+        prompt_payload = {
+            "existing_canonical_organizations": pipe_registry,
+            "raw_affiliation_strings": raw_strings,
+        }
+        contents = [
+            SYSTEM_PROMPT,
+            f"INPUT PAYLOAD:\n{json.dumps(prompt_payload, separators=(',', ':'), ensure_ascii=False)}",
+        ]
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            should_return_http_response=True,
+        )
+
 
         for attempt in range(max_retries):
             self.rate_limiter.acquire()
@@ -323,6 +292,7 @@ class GeminiClient:
             except (errors.APIError, Exception) as e:
                 err_str = str(e)
                 is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str
+                is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
                 
                 retry_secs = None
                 match = re.search(r"Please retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
@@ -347,6 +317,18 @@ class GeminiClient:
                         )
                     time.sleep(sleep_time)
                     continue
+                elif is_503:
+                    if attempt < max_retries - 1:
+                        sleep_time = min(60.0, (2 ** attempt) * 2.0 + random.uniform(1.0, 3.0))
+                        logger.warning(
+                            f"Gemini API 503 Service Unavailable ({e}). "
+                            f"Exponential back-off sleeping for {sleep_time:.2f}s before retry (Attempt {attempt+1}/{max_retries})"
+                        )
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        logger.error(f"Failed Gemini API normalization query after {max_retries} attempts due to 503 Service Unavailable: {e}", exc_info=True)
+                        raise e
                 else:
                     if attempt < max_retries - 1:
                         sleep_time = max(15.0, (2 ** attempt) * 3.0 + random.uniform(1.0, 3.0))
@@ -358,6 +340,7 @@ class GeminiClient:
                     logger.error(f"Failed Gemini API normalization query after {max_retries} attempts: {e}", exc_info=True)
                     raise e
 
+
         err_msg = f"Exhausted retries ({max_retries}) querying Gemini API for batch normalization."
         logger.error(err_msg, exc_info=True)
         raise RuntimeError(err_msg)
@@ -368,7 +351,7 @@ class GeminiClient:
         candidates: List[Dict[str, Any]],
         short_name: Optional[str] = None,
         search_term: Optional[str] = None,
-        max_retries: int = 3,
+        max_retries: int = 10,
     ) -> Optional[str]:
         """
         Uses Gemini LLM to analyze candidate OpenAlex source records for a venue,
@@ -441,6 +424,21 @@ class GeminiClient:
                     logger.info(f"Gemini selected OpenAlex source ID '{sel_id}' for venue '{venue}' (Reasoning: {res_json.get('reasoning')})")
                     return sel_id
             except Exception as e:
-                logger.warning(f"Gemini source resolution attempt {attempt+1} failed: {e}")
+                err_str = str(e)
+                is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
+                sleep_time = min(60.0, (2 ** attempt) * 2.0 + random.uniform(1.0, 3.0))
+                if is_503:
+                    logger.warning(
+                        f"Gemini source resolution API 503 Service Unavailable ({e}). "
+                        f"Exponential back-off sleeping for {sleep_time:.2f}s before retry (Attempt {attempt+1}/{max_retries})"
+                    )
+                else:
+                    logger.warning(
+                        f"Gemini source resolution attempt {attempt+1}/{max_retries} failed ({e}). "
+                        f"Exponential back-off sleeping for {sleep_time:.2f}s"
+                    )
+                if attempt < max_retries - 1:
+                    time.sleep(sleep_time)
 
         return None
+

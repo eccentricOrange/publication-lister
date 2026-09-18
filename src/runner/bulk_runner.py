@@ -125,8 +125,10 @@ class BulkRunner:
         string_to_canonical_id: Dict[str, str] = {}
         unresolved_strings: List[str] = []
 
-        for raw_str in sorted(list(global_unique_strings)):
-            match = self.registry.find_by_string(raw_str)
+        strings_to_check = sorted(list(global_unique_strings))
+        batch_matches = self.registry.batch_find_by_strings(strings_to_check)
+        for raw_str in strings_to_check:
+            match = batch_matches.get(raw_str)
             if match:
                 string_to_canonical_id[raw_str] = match["canonical_id"]
             else:
@@ -134,32 +136,14 @@ class BulkRunner:
 
         logger.info(f"Local registry matched {len(string_to_canonical_id)} strings globally. {len(unresolved_strings)} unresolved strings remaining for LLM query.")
 
-        # 3. Server-side context cache / dynamic batching for remaining unresolved strings
-        cached_content_id: Optional[str] = None
-        if unresolved_strings and self.gemini_client.api_key:
-            try:
-                full_registry_summary = [
-                    {
-                        "canonical_id": e["canonical_id"],
-                        "canonical_name": e["canonical_name"],
-                        "entity_type": e["entity_type"],
-                        "known_aliases": e.get("known_aliases", []),
-                    }
-                    for e in self.registry.entries
-                ]
-                cached_content_id = self.gemini_client.create_cached_context(full_registry_summary)
-            except Exception as exc:
-                logger.warning(f"Failed creating Gemini server-side context cache: {exc}. Proceeding with inline prompt context.")
-
-        new_orgs_since_cache_sync = 0
-
+        # 3. Dynamic batching with inline compact context for remaining unresolved strings
         while unresolved_strings:
             still_unresolved = []
             newly_matched = 0
-            for raw_str in unresolved_strings:
-                if raw_str in string_to_canonical_id:
-                    continue
-                match = self.registry.find_by_string(raw_str)
+            strings_to_recheck = [raw_str for raw_str in unresolved_strings if raw_str not in string_to_canonical_id]
+            recheck_matches = self.registry.batch_find_by_strings(strings_to_recheck)
+            for raw_str in strings_to_recheck:
+                match = recheck_matches.get(raw_str)
                 if match:
                     string_to_canonical_id[raw_str] = match["canonical_id"]
                     newly_matched += 1
@@ -185,8 +169,8 @@ class BulkRunner:
 
             batch, registry_summary = self.gemini_client.calculate_dynamic_batch(
                 unresolved_strings,
-                full_registry_summary if not cached_content_id else None,
-                target_batch_size=batch_size if cached_content_id else 50,
+                full_registry_summary,
+                target_batch_size=batch_size,
             )
 
             logger.info(f"Querying Gemini API for pooled batch of {len(batch)} unresolved strings ({len(string_to_canonical_id)} resolved, {len(unresolved_strings)} remaining)")
@@ -194,8 +178,7 @@ class BulkRunner:
             try:
                 resolutions = self.gemini_client.normalize_batch(
                     batch,
-                    cached_content=cached_content_id,
-                    canonical_registry_summary=registry_summary if not cached_content_id else None,
+                    canonical_registry_summary=registry_summary,
                 )
             except Exception as e:
                 logger.error(f"Failed pooled batch normalization with Gemini API: {e}", exc_info=True)
@@ -229,7 +212,6 @@ class BulkRunner:
                         known_aliases=[raw_str.strip()],
                     )
                     string_to_canonical_id[raw_str] = new_entry["canonical_id"]
-                    new_orgs_since_cache_sync += 1
                 else:
                     match = self.registry.find_by_string(raw_str.strip())
                     if match:
@@ -241,25 +223,9 @@ class BulkRunner:
                             known_aliases=[raw_str.strip()],
                         )
                         string_to_canonical_id[raw_str] = new_entry["canonical_id"]
-                        new_orgs_since_cache_sync += 1
-
-            if cached_content_id and new_orgs_since_cache_sync >= 50:
-                try:
-                    updated_registry_summary = [
-                        {
-                            "canonical_id": e["canonical_id"],
-                            "canonical_name": e["canonical_name"],
-                            "entity_type": e["entity_type"],
-                            "known_aliases": e.get("known_aliases", []),
-                        }
-                        for e in self.registry.entries
-                    ]
-                    cached_content_id = self.gemini_client.create_cached_context(updated_registry_summary)
-                    new_orgs_since_cache_sync = 0
-                except Exception as exc:
-                    logger.warning(f"Could not re-sync Gemini server-side context cache: {exc}")
 
         # 4. Map global resolutions back to individual venue/year normalized files
+
         normalized_artifacts: Dict[Tuple[str, int], Dict[str, Any]] = {}
 
         for (venue, year), rdata in venue_year_raw_data.items():

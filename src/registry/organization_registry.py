@@ -1,8 +1,10 @@
+import os
+import concurrent.futures
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 from src.config import CANONICAL_REGISTRY_PATH
 
@@ -18,65 +20,47 @@ def generate_slug(name: str) -> str:
          'Google LLC' -> 'GOOGUS'
          'NASA Jet Propulsion Laboratory' -> 'NASAJPL'
     """
-    # Remove special characters
-    clean_name = re.sub(r"[^\w\s]", "", name).upper()
-    words = clean_name.split()
+    clean = re.sub(r"[^a-zA-Z0-9]", "", name).upper()
+    if len(clean) >= 6:
+        return clean[:6]
+    return clean.ljust(6, "X")
 
-    if not words:
-        return "XXXXXX"
-
-    if len(words) == 1:
-        slug = words[0][:6]
-    else:
-        # Pick capital initials or word prefixes
-        letters = [w[0] for w in words if w]
-        if len(letters) >= 6:
-            slug = "".join(letters[:6])
-        else:
-            slug = "".join(letters)
-            for w in words:
-                if len(slug) < 6 and len(w) > 1:
-                    slug += w[1 : 6 - len(slug) + 1]
-                if len(slug) >= 6:
-                    break
-
-    slug = re.sub(r"[^A-Z0-9]", "", slug).upper()
-    slug = slug.ljust(6, "X")[:6]
-    return slug
 
 
 class OrganizationRegistry:
     """
-    Manages persistent central registry of canonical organization entities.
-    Enforces strict ID schema: [TYPE:3]-[ID:5]-[SLUG:6]
+    Central Manager for Canonical Organizations Registry (data/canonical_organizations.json).
+    Ensures unique canonical IDs ([TYPE:3]-[ID:5]-[SLUG:6]), alias deduplication,
+    pre-indexed fast substring matching, and parallel multithreaded batch processing.
     """
 
     def __init__(self, registry_path: Path = CANONICAL_REGISTRY_PATH):
         self.registry_path = registry_path
         self.entries: List[Dict[str, Any]] = []
         self._lookup_map: Dict[str, Dict[str, Any]] = {}
-        self.load()
+        self._searchable_aliases: List[Tuple[str, Dict[str, Any]]] = []
+        self.load_registry()
 
-    def load(self) -> None:
-        """Loads canonical organization records from JSON file."""
-        if not self.registry_path.exists():
-            logger.warning(f"Registry file not found at {self.registry_path}. Initializing empty registry.")
+    def load_registry(self) -> None:
+        """Loads canonical organization registry from JSON file."""
+        if not self.registry_path.exists() or self.registry_path.stat().st_size == 0:
+            logger.info(f"Canonical organization registry file not found at {self.registry_path}. Initializing empty registry.")
             self.entries = []
             self._rebuild_lookup_map()
             return
 
         try:
-            logger.info(f"Opening canonical organization registry file for reading: {self.registry_path.resolve()}")
+            logger.info(f"Opening file for reading canonical registry: {self.registry_path.resolve()}")
             with open(self.registry_path, "r", encoding="utf-8") as f:
                 self.entries = json.load(f)
             self._rebuild_lookup_map()
-            logger.info(f"Loaded {len(self.entries)} canonical organization entries from {self.registry_path}")
+            logger.info(f"Successfully loaded {len(self.entries)} canonical organization entities from {self.registry_path}")
         except Exception as e:
-            logger.error(f"Failed to load canonical organization registry from {self.registry_path}", exc_info=True)
+            logger.error(f"Failed to load canonical registry file at {self.registry_path}", exc_info=True)
             raise e
 
-    def save(self) -> None:
-        """Saves current registry entries to JSON file."""
+    def save_registry(self) -> None:
+        """Saves canonical organization registry to JSON file."""
         try:
             self.registry_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Opening canonical organization registry file for writing: {self.registry_path.resolve()}")
@@ -87,25 +71,49 @@ class OrganizationRegistry:
             logger.error(f"Failed to save canonical registry to {self.registry_path}", exc_info=True)
             raise e
 
+    def save(self) -> None:
+        """Alias for save_registry."""
+        self.save_registry()
+
+
     def _normalize_key(self, text: str) -> str:
         """Normalize string for lookup matching."""
         return re.sub(r"\s+", " ", text.strip().lower())
 
     def _rebuild_lookup_map(self) -> None:
-        """Rebuilds fast lookup map for alias/name matching."""
+        """Rebuilds fast lookup map and pre-indexes searchable aliases sorted descending by length."""
         self._lookup_map = {}
+        generic_stopwords = {
+            "university", "college", "institute", "school", "department", "center", "centre", 
+            "laboratory", "lab", "inc", "ltd", "corp", "corporation", "llc", "group", "faculty", "academy"
+        }
+        
+        searchable_list = []
         for entry in self.entries:
             c_id = entry["canonical_id"]
             c_name = entry["canonical_name"]
             self._lookup_map[c_id.upper()] = entry
-            self._lookup_map[self._normalize_key(c_name)] = entry
-            for alias in entry.get("known_aliases", []):
-                self._lookup_map[self._normalize_key(alias)] = entry
+            
+            c_name_norm = self._normalize_key(c_name)
+            self._lookup_map[c_name_norm] = entry
+
+            seen_norms = set()
+            for alias in [c_name] + entry.get("known_aliases", []):
+                alias_norm = self._normalize_key(alias)
+                self._lookup_map[alias_norm] = entry
+                if alias_norm and alias_norm not in generic_stopwords and len(alias_norm) >= 4:
+                    if alias_norm not in seen_norms:
+                        seen_norms.add(alias_norm)
+                        searchable_list.append((alias_norm, entry))
+
+        # Sort aliases descending by length so the first match in find_by_string is guaranteed to be the longest match
+        searchable_list.sort(key=lambda x: len(x[0]), reverse=True)
+        self._searchable_aliases = searchable_list
 
     def find_by_string(self, raw_string: str) -> Optional[Dict[str, Any]]:
         """
         Looks up a raw affiliation string in canonical registry.
-        Checks canonical_id first, then canonical name and known aliases via exact & longest substring match.
+        Checks canonical_id first, then exact canonical name & aliases, and finally pre-indexed longest substring match.
         """
         if not raw_string:
             return None
@@ -118,25 +126,39 @@ class OrganizationRegistry:
         if norm_key in self._lookup_map:
             return self._lookup_map[norm_key]
 
-        # Stopwords to ignore for standalone substring matching
-        generic_stopwords = {"university", "college", "institute", "school", "department", "center", "centre", "laboratory", "lab", "inc", "ltd", "corp", "corporation", "llc", "group", "faculty", "academy"}
+        len_norm = len(norm_key)
+        for alias_norm, entry in self._searchable_aliases:
+            if len(alias_norm) <= len_norm and alias_norm in norm_key:
+                # Guaranteed to be the longest match because _searchable_aliases is sorted descending by length
+                return entry
 
-        # Try matching known canonical names & aliases as substrings inside norm_key
-        best_match = None
-        longest_match_len = 0
+        return None
 
-        for entry in self.entries:
-            for alias in [entry["canonical_name"]] + entry.get("known_aliases", []):
-                alias_norm = self._normalize_key(alias)
-                if not alias_norm or alias_norm in generic_stopwords:
-                    continue
-                # Require alias length >= 4 to avoid short acronym false positives
-                if len(alias_norm) >= 4 and alias_norm in norm_key:
-                    if len(alias_norm) > longest_match_len:
-                        best_match = entry
-                        longest_match_len = len(alias_norm)
+    def batch_find_by_strings(
+        self,
+        raw_strings: List[str],
+        max_workers: Optional[int] = None,
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        Parallelized lookup for a list of raw affiliation strings against canonical registry.
+        Uses ThreadPoolExecutor to process strings concurrently across CPU cores.
+        """
+        if not raw_strings:
+            return {}
 
-        return best_match
+        if len(raw_strings) < 20:
+            return {s: self.find_by_string(s) for s in raw_strings}
+
+        workers = max_workers or min(32, (os.cpu_count() or 4) * 4)
+        results: Dict[str, Optional[Dict[str, Any]]] = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_string = {executor.submit(self.find_by_string, s): s for s in raw_strings}
+            for future in concurrent.futures.as_completed(future_to_string):
+                s = future_to_string[future]
+                results[s] = future.result()
+
+        return results
 
     def find_by_id(self, canonical_id: str) -> Optional[Dict[str, Any]]:
         """Finds entry by exact canonical ID."""
