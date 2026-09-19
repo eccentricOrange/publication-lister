@@ -61,6 +61,9 @@ class BulkRunner:
             for year in self.config.years:
                 if not self.config.is_year_active(venue, year):
                     logger.info(f"Skipping {venue} {year}: inactive year specified in batch configuration exceptions.")
+                    extractor = OpenAlexExtractor()
+                    extractor.append_raw_batch(venue, year, [], completed=True, next_cursor=None)
+                    processed_pairs.append((venue, year))
                     continue
 
                 overrides = self.config.get_overrides(venue, year)
@@ -113,12 +116,17 @@ class BulkRunner:
             for year in self.config.years:
                 raw_file = self.raw_dir / venue / f"{venue}_{year}.json"
                 if not raw_file.exists():
-                    err_msg = f"Raw dataset file missing for {venue} {year} at {raw_file}. Run Phase 1 first."
-                    logger.error(err_msg)
-                    raise FileNotFoundError(err_msg)
+                    if not self.config.is_year_active(venue, year):
+                        extractor = OpenAlexExtractor()
+                        rdata = extractor.append_raw_batch(venue, year, [], completed=True, next_cursor=None)
+                    else:
+                        err_msg = f"Raw dataset file missing for {venue} {year} at {raw_file}. Run Phase 1 first."
+                        logger.error(err_msg)
+                        raise FileNotFoundError(err_msg)
+                else:
+                    with open(raw_file, "r", encoding="utf-8") as f:
+                        rdata = json.load(f)
 
-                with open(raw_file, "r", encoding="utf-8") as f:
-                    rdata = json.load(f)
                 venue_year_raw_data[(venue, year)] = rdata
 
                 for p in rdata.get("papers", []):

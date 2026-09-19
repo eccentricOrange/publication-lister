@@ -53,18 +53,26 @@ class MatrixExporter:
         for y in years:
             norm_file = self.normalized_dir / f"{clean_venue}_{y}_normalized.json"
             if not norm_file.exists():
-                err_msg = f"Normalized data file for {clean_venue} {y} not found at {norm_file}. Run normalize subcommand first."
-                logger.error(err_msg, exc_info=True)
-                raise FileNotFoundError(err_msg)
-
-
-            try:
-                logger.info(f"Opening normalized data file for matrix reading: {norm_file.resolve()}")
-                with open(norm_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                logger.error(f"Failed loading normalized file at {norm_file}", exc_info=True)
-                raise e
+                logger.info(f"Normalized data file for {clean_venue} {y} not found at {norm_file}. Creating 0-paper empty normalized artifact.")
+                norm_file.parent.mkdir(parents=True, exist_ok=True)
+                data = {
+                    "venue": clean_venue,
+                    "year": y,
+                    "completed": True,
+                    "total_papers": 0,
+                    "resolved_mappings": {},
+                    "papers": [],
+                }
+                with open(norm_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            else:
+                try:
+                    logger.info(f"Opening normalized data file for matrix reading: {norm_file.resolve()}")
+                    with open(norm_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    logger.error(f"Failed loading normalized file at {norm_file}", exc_info=True)
+                    raise e
 
             papers = data.get("papers", [])
             logger.info(f"Processing {len(papers)} normalized papers for {venue_upper} {y}")

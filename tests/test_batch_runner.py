@@ -87,13 +87,13 @@ source: openalex
     def test_multiple_search_terms_parsing(self):
         custom_yaml = self.root_path / "multi_search_batch.yaml"
         content = """
-        venues:
-        - search_term:
-            - "European Conference on Computer Vision"
-            - "ECCV"
-            short_name: ECCV
-        years: [2024]
-        source: openalex
+venues:
+  - search_term:
+      - "European Conference on Computer Vision"
+      - "ECCV"
+    short_name: ECCV
+years: [2024]
+source: openalex
         """
         with open(custom_yaml, "w", encoding="utf-8") as f:
             f.write(content)
