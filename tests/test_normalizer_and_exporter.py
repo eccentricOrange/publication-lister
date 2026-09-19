@@ -160,8 +160,40 @@ class TestNormalizerAndExporter(unittest.TestCase):
         self.assertIsNotNone(genai_client._api_client._http_options)
         retry_opts = genai_client._api_client._http_options.retry_options
         self.assertIsNotNone(retry_opts)
-        self.assertEqual(retry_opts.attempts, 10)
+        self.assertEqual(retry_opts.attempts, 2)
         self.assertIn(503, retry_opts.http_status_codes)
+        self.assertNotIn(504, retry_opts.http_status_codes)
+
+    def test_gemini_client_normalize_batch_timeout_split(self):
+        from unittest.mock import MagicMock
+        from src.normalizer.gemini_client import GeminiClient
+
+        client = GeminiClient(api_key="dummy_key_for_testing")
+        client._client = MagicMock()
+
+        # Simulate 504 Timeout on first call with 20 strings, then success on sub-batches of 10
+        raw_strings = [f"Affiliation_{i}" for i in range(20)]
+
+        def side_effect(model, contents, config):
+            payload_str = contents[1]
+            if "Affiliation_0" in payload_str and "Affiliation_19" in payload_str:
+                raise Exception("504 DEADLINE_EXCEEDED: Deadline expired")
+            # Sub-batch 1
+            if "Affiliation_0" in payload_str:
+                mock_resp = MagicMock()
+                mock_resp.text = json.dumps({"resolutions": {f"Affiliation_{i}": f"UNI-0000{i}" for i in range(10)}})
+                return mock_resp
+            # Sub-batch 2
+            mock_resp = MagicMock()
+            mock_resp.text = json.dumps({"resolutions": {f"Affiliation_{i}": f"UNI-0000{i}" for i in range(10, 20)}})
+            return mock_resp
+
+        client.client.models.generate_content.side_effect = side_effect
+        resolutions = client.normalize_batch(raw_strings)
+
+        self.assertEqual(len(resolutions), 20)
+        self.assertEqual(resolutions["Affiliation_0"]["canonical_id"], "UNI-00000")
+        self.assertEqual(resolutions["Affiliation_19"]["canonical_id"], "UNI-000019")
 
 
 

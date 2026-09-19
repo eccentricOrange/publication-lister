@@ -69,6 +69,53 @@ class CSVCleaner:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _query_step1_chunk(
+        self, chunk: List[Dict[str, Any]], config: Any
+    ) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
+        """Queries Gemini LLM for Step 1 analysis with adaptive sub-chunking on timeout."""
+        if not chunk:
+            return [], [], []
+
+        payload_step1 = {"matrix_rows": chunk}
+        contents_step1 = [
+            SYSTEM_PROMPT_STEP1_ANALYSIS,
+            f"INPUT PAYLOAD:\n{json.dumps(payload_step1, separators=(',', ':'), ensure_ascii=False)}",
+        ]
+
+        self.gemini_client.rate_limiter.acquire()
+        try:
+            response_step1 = self.gemini_client.client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents_step1,
+                config=config,
+            )
+            text_step1 = self.gemini_client._extract_response_text(response_step1)
+            step1_json = json.loads(text_step1)
+
+            p_ids = step1_json.get("prune_ids", [])
+            p_names = step1_json.get("requested_parent_names", [])
+            m_groups = step1_json.get("merges", [])
+
+            return (
+                p_ids if isinstance(p_ids, list) else [],
+                p_names if isinstance(p_names, list) else [],
+                m_groups if isinstance(m_groups, list) else [],
+            )
+        except Exception as e:
+            err_str = str(e)
+            is_timeout = "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower() or "timeout" in err_str.lower()
+            if is_timeout and len(chunk) > 25:
+                mid = len(chunk) // 2
+                logger.warning(
+                    f"Step 1 query timed out (504/Deadline Exceeded) on chunk of {len(chunk)} rows. "
+                    f"Splitting into sub-chunks of {mid} and {len(chunk) - mid} rows."
+                )
+                p1, n1, m1 = self._query_step1_chunk(chunk[:mid], config)
+                p2, n2, m2 = self._query_step1_chunk(chunk[mid:], config)
+                return p1 + p2, n1 + n2, m1 + m2
+            logger.warning(f"Error querying Gemini LLM for cleaning chunk of {len(chunk)} rows: {e}")
+            return [], [], []
+
     def clean_file(
         self,
         input_csv_path: Path,
@@ -138,27 +185,26 @@ class CSVCleaner:
             should_return_http_response=True,
         )
 
-        # STEP 1: Query Gemini to analyze CSV, identify prunes, and request parent names for merges
-        logger.info(f"Step 1: Querying Gemini LLM with {len(rows)} matrix row headers to identify prunes & request parent merge names...")
-        payload_step1 = {"matrix_rows": compact_rows}
-        contents_step1 = [
-            SYSTEM_PROMPT_STEP1_ANALYSIS,
-            f"INPUT PAYLOAD:\n{json.dumps(payload_step1, separators=(',', ':'), ensure_ascii=False)}",
-        ]
+        # STEP 1: Query Gemini to analyze CSV in chunks of max 100 rows to prevent 504 Gateway Timeouts
+        chunk_size = 100
+        row_chunks = [compact_rows[i : i + chunk_size] for i in range(0, len(compact_rows), chunk_size)]
 
-        self.gemini_client.rate_limiter.acquire()
-        response_step1 = self.gemini_client.client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents_step1,
-            config=config,
-        )
+        all_prune_ids: List[str] = []
+        all_requested_parent_names: List[str] = []
+        all_merges: List[Dict[str, Any]] = []
 
-        text_step1 = self.gemini_client._extract_response_text(response_step1)
-        step1_json = json.loads(text_step1)
+        logger.info(f"Step 1: Querying Gemini LLM for {len(rows)} matrix rows across {len(row_chunks)} chunk(s) (max {chunk_size} rows/chunk)...")
 
-        prune_ids: List[str] = step1_json.get("prune_ids", [])
-        requested_parent_names: List[str] = step1_json.get("requested_parent_names", [])
-        merges: List[Dict[str, Any]] = step1_json.get("merges", [])
+        for idx, chunk in enumerate(row_chunks, 1):
+            logger.info(f"Step 1 (Chunk {idx}/{len(row_chunks)}): Querying Gemini LLM with {len(chunk)} matrix row headers...")
+            p_ids, p_names, m_groups = self._query_step1_chunk(chunk, config)
+            all_prune_ids.extend(p_ids)
+            all_requested_parent_names.extend(p_names)
+            all_merges.extend(m_groups)
+
+        prune_ids: List[str] = all_prune_ids
+        requested_parent_names: List[str] = list(set(all_requested_parent_names))
+        merges: List[Dict[str, Any]] = all_merges
 
         prune_set: Set[str] = {str(pid).strip().lower() for pid in prune_ids if pid}
 

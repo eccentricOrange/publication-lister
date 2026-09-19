@@ -75,17 +75,17 @@ class GeminiClient:
                 err_msg = "GEMINI_API_KEY is missing. Cannot initialize Gemini Client."
                 logger.error(err_msg, exc_info=True)
                 raise ValueError(err_msg)
-            # Use 120-second timeout (120,000 ms) and native HttpRetryOptions with exponential backoff for 503 and transient errors
+            # Use 45-second timeout (45,000 ms) and native HttpRetryOptions with limited attempts for transient errors
             self._client = genai.Client(
                 api_key=self.api_key,
                 http_options=types.HttpOptions(
-                    timeout=120_000,
+                    timeout=45_000,
                     retry_options=types.HttpRetryOptions(
-                        attempts=10,
-                        initial_delay=15.0,
-                        max_delay=300.0,
+                        attempts=2,
+                        initial_delay=2.0,
+                        max_delay=10.0,
                         exp_base=2.0,
-                        http_status_codes=[503, 500, 502, 504, 429, 408],
+                        http_status_codes=[503, 500, 502, 429],
                     ),
                 ),
             )
@@ -290,6 +290,7 @@ class GeminiClient:
                 err_str = str(e)
                 is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str
                 is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
+                is_504 = "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower() or "timeout" in err_str.lower()
                 
                 retry_secs = None
                 match = re.search(r"Please retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
@@ -298,6 +299,19 @@ class GeminiClient:
                         retry_secs = float(match.group(1))
                     except ValueError:
                         pass
+
+                if is_504 and len(raw_strings) > 10:
+                    mid = len(raw_strings) // 2
+                    logger.warning(
+                        f"Gemini API normalization timed out (504/Deadline Exceeded) on batch of {len(raw_strings)} strings. "
+                        f"Splitting batch into sub-batches of {mid} and {len(raw_strings) - mid} strings."
+                    )
+                    res1 = self.normalize_batch(raw_strings[:mid], canonical_registry_summary=canonical_registry_summary, max_retries=max_retries)
+                    res2 = self.normalize_batch(raw_strings[mid:], canonical_registry_summary=canonical_registry_summary, max_retries=max_retries)
+                    combined = {}
+                    combined.update(res1)
+                    combined.update(res2)
+                    return combined
 
                 if is_429:
                     if retry_secs is not None:
