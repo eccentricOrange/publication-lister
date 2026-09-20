@@ -284,7 +284,7 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
 
 ## Interactive Web Dashboard & GitHub Pages Visualisation
 
-`publication-lister` includes a client-side web application hosted in the `visualisation/` directory designed for GitHub Pages deployment.
+`publication-lister` includes a client-side web application hosted in the `docs/` directory designed for GitHub Pages deployment.
 
 ### Features
 * **Single Source of Truth**: Reads cleaned CSV matrices (`data/cleaned_output/`), automatically merging split venue datasets (e.g. `IROS_affiliations_2016_2020.csv` + `IROS_affiliations_2017_2025.csv` into a unified `IROS` dataset).
@@ -304,7 +304,7 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
    ```bash
    python3 main.py build-visualisation
    ```
-2. In your GitHub repository settings, go to **Pages** and set the source directory to `/visualisation` (or deploy the `visualisation/` folder to your `gh-pages` branch).
+2. In your GitHub repository settings, go to **Pages** and set the source directory to `/docs` (or standard `docs/` folder on `main` branch).
 
 ---
 
@@ -330,8 +330,8 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
 | [src/normalizer/affiliation_normalizer.py](src/normalizer/affiliation_normalizer.py) | No | Normalization coordinator orchestrating local registry lookup and batched Gemini LLM resolution. |
 | [src/exporters/matrix_exporter.py](src/exporters/matrix_exporter.py) | No | Generates matrix CSV files with paper deduplication and institution sorting. |
 | [src/cleaner/csv_cleaner.py](src/cleaner/csv_cleaner.py) | No | Post-cleaning module utilizing Gemini LLM + Python aggregation to prune department rows and merge sub-entities into `data/cleaned_output/`. |
-| [scripts/build_site_data.py](scripts/build_site_data.py) | No | Data builder script converting cleaned CSV matrices into `visualisation/data/site_data.json` for web visualization. |
-| `visualisation/` | Web App | GitHub Pages static web application directory containing `index.html`, `organisation.html`, CSS, JS, and data manifests. |
+| [scripts/build_site_data.py](scripts/build_site_data.py) | No | Data builder script converting cleaned CSV matrices into `docs/data/site_data.json` for web visualization. |
+| `docs/` | Web App | GitHub Pages static web application directory containing `index.html`, `organisation.html`, CSS, JS, and data manifests. |
 | `data/canonical_organizations.json` | Persistent Data | Central persistent database of canonical institutional entities, types, and aliases. |
 | `data/openalex_sources_cache.json` | Persistent Cache | Resolved mapping of venue acronyms to OpenAlex Source IDs, DOI prefixes, and publication frequency. |
 

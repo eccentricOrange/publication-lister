@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 7. Build Visualisation subcommand
-    p_vis = subparsers.add_parser("build-visualisation", aliases=["visualize", "build-vis"], help="Build web visualization dataset manifest in visualisation/data/")
+    p_vis = subparsers.add_parser("build-visualisation", aliases=["visualize", "build-vis"], help="Build web visualization dataset manifest in docs/data/")
     p_vis.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser

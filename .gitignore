@@ -41,3 +41,4 @@ logs/
 
 # Data directories (keep canonical registry, ignore raw/normalized/output contents)
 data
+planning

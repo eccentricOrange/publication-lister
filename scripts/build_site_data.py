@@ -36,7 +36,7 @@ def build_site_data(
     output_dir: Path = OUTPUT_DATA_DIR,
     registry_path: Path = CANONICAL_REGISTRY_PATH,
     sources_cache_path: Path = OPENALEX_SOURCES_CACHE_PATH,
-    target_json_path: Path = Path("visualisation/data/site_data.json"),
+    target_json_path: Path = Path("docs/data/site_data.json"),
 ) -> Dict[str, Any]:
     """
     Scans matrix CSV files, merges split files per venue, cross-references canonical metadata and OpenAlex sources cache,
