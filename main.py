@@ -150,12 +150,21 @@ def run_clean(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def run_build_visualisation(args: argparse.Namespace) -> None:
+    from scripts.build_site_data import build_site_data
+    logger.info("Executing BUILD-VISUALISATION subcommand...")
+    build_site_data()
+    logger.info("Visualisation dataset manifest built successfully.")
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Executing FULL PIPELINE flow...")
     run_extract(args)
     run_normalize(args)
     run_export(args)
     run_clean(args)
+    if getattr(args, "build_visualisation", False):
+        run_build_visualisation(args)
     logger.info("Full pipeline completed successfully.")
 
 
@@ -168,6 +177,8 @@ def run_batch(args: argparse.Namespace) -> None:
     config = BatchConfig.from_file(config_path)
     runner = BulkRunner(config=config, model=model)
     runner.run_all(force=force)
+    if getattr(args, "build_visualisation", False):
+        run_build_visualisation(args)
     logger.info("Batch pipeline execution completed successfully.")
 
 
@@ -226,13 +237,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--schedule-url", type=str, default=None, help="URL to online conference schedule")
     p_pipe.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
     p_pipe.add_argument("--force", action="store_true", help="Force re-run of all pipeline steps")
+    p_pipe.add_argument("--build-visualisation", "--build-vis", action="store_true", help="Automatically generate visualization JSON manifest after pipeline completion")
 
     # 6. Batch subcommand
     p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
     p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
     p_batch.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_batch.add_argument("--build-visualisation", "--build-vis", action="store_true", help="Automatically generate visualization JSON manifest after batch completion")
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
+
+    # 7. Build Visualisation subcommand
+    p_vis = subparsers.add_parser("build-visualisation", aliases=["visualize", "build-vis"], help="Build web visualization dataset manifest in visualisation/data/")
+    p_vis.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser
 
@@ -242,7 +259,7 @@ def cli() -> None:
     args = parser.parse_args()
 
     # Configure centralized logging at entrypoint
-    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     setup_logging(level=log_level)
 
     try:
@@ -258,6 +275,8 @@ def cli() -> None:
             run_pipeline(args)
         elif args.subcommand == "batch":
             run_batch(args)
+        elif args.subcommand in ("build-visualisation", "visualize", "build-vis"):
+            run_build_visualisation(args)
     except Exception as e:
         logger.error(f"Execution failed on subcommand '{args.subcommand}'", exc_info=True)
         sys.exit(1)

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Publication Lister Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <header class="header">
+        <div class="header-container">
+            <div class="header-title">
+                <h1>Academic & Industry Publication Lister</h1>
+                <p>Tracking institution-level output across top robotics, AI, and computer vision venues</p>
+            </div>
+            <div class="global-search-box">
+                <input type="text" id="globalSearchInput" placeholder="Search institution across all venues..." autocomplete="off">
+                <div id="globalSearchResults" class="search-results-dropdown"></div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Venue Navigation Tabs -->
+        <div class="tabs-scroll-container">
+            <nav class="tabs-nav" id="venueTabsContainer">
+                <!-- Dynamically populated venue tab buttons -->
+            </nav>
+        </div>
+
+        <!-- Key Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Publications</div>
+                <div class="stat-value" id="statTotalPubs">-</div>
+                <div class="stat-sub" id="statYearRange">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Unique Institutions</div>
+                <div class="stat-value" id="statTotalInsts">-</div>
+                <div class="stat-sub">Canonical Entities</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Top Institution</div>
+                <div class="stat-value" id="statTopInstName" style="font-size: 1.1rem; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</div>
+                <div class="stat-sub" id="statTopInstCount">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Source / Website</div>
+                <div class="stat-value" style="font-size: 1rem;"><a id="statVenueLink" href="#" target="_blank" rel="noopener">OpenAlex Source ↗</a></div>
+                <div class="stat-sub" id="statVenueFreq">-</div>
+            </div>
+        </div>
+
+        <!-- Interactive Chart Section -->
+        <section class="card">
+            <h2 class="card-title">
+                <span id="chartVenueTitle">Venue Timeline</span>
+                <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">Hover over points for exact counts</span>
+            </h2>
+            <div class="chart-wrapper">
+                <canvas id="venueChart"></canvas>
+            </div>
+        </section>
+
+        <!-- CSV Data Table Section -->
+        <section class="card">
+            <div class="table-controls">
+                <div class="filter-group">
+                    <input type="text" id="tableSearchInput" class="input-search" placeholder="Filter institutions or aliases...">
+                    <select id="typeFilterSelect" class="select-filter">
+                        <option value="ALL">All Entity Types</option>
+                        <option value="UNI">Universities (UNI)</option>
+                        <option value="LAB">Research Labs (LAB)</option>
+                        <option value="COM">Companies (COM)</option>
+                        <option value="GOV">Government / Non-profit (GOV)</option>
+                    </select>
+                </div>
+                <button id="downloadCsvBtn" class="btn btn-primary">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                    Download CSV
+                </button>
+            </div>
+
+            <div class="table-container">
+                <table class="data-table" id="venueDataTable">
+                    <thead>
+                        <tr id="tableHeaderRow">
+                            <!-- Dynamically populated table headers -->
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <!-- Dynamically populated table rows -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
+

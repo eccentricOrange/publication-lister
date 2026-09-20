@@ -19,14 +19,12 @@ A modular, extensible Python toolkit and CLI application to extract, deduplicate
 4. **Canonical ID Format**:
    - Fixed-length unique identifiers following `[TYPE:3]-[ID:5]-[SLUG:6]` (e.g., `UNI-00142-UCSDCA`, `COM-00028-GOOGUS`, `GOV-00009-NASAJPL`).
 5. **Robust Venue Resolution & Filter Safety**:
-   - Converts venue names $\rightarrow$ official OpenAlex Source IDs via the OpenAlex Sources API dis-ambiguated by Gemini LLM (`gemini-3.1-flash-lite`).
    - Converts venue names $\rightarrow$ official OpenAlex Source IDs via the OpenAlex Sources API dis-ambiguated by Gemini LLM (configurable via `--model`, defaulting to `gemini-3.1-flash-lite`).
    - Dynamically derives DOI prefixes (`10.1109/{acronym}`) to recover papers from untagged OpenAlex proceedings years.
    - **Zero Garbage Fallback**: Strictly avoids unconstrained raw text search (`search: venue`), preventing non-robotics papers (e.g. chemistry or biology papers mentioning "ICRA") from corrupting dataset statistics.
 6. **4-Phase Bulk Execution Engine**:
    - **Phase 1 (Bulk Extraction)**: Ingests raw data across all configured venues/years with cursor checkpointing and pause/resume support.
    - **Phase 2 (Global Pooled Normalization)**: Pools all raw affiliation strings across **all** datasets into a single resolution pass against the local registry and Gemini LLM. This maximizes string overlap and minimizes LLM API consumption.
-   - **Phase 3 (Matrix Export)**: Exports clean CSV matrix reports sorted descending by total publication volume.
    - **Phase 3 (Matrix Export)**: Exports CSV matrix reports sorted descending by total publication volume.
    - **Phase 4 (Matrix Post-Cleaning)**: Cleans exported CSV matrices with Gemini LLM + Python aggregation into `data/cleaned_output/`.
 
@@ -194,7 +192,6 @@ exceptions:
 
 | Field | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
-| `search_term` | String | **Yes** | Full query term passed to OpenAlex Sources API or IEEE Xplore (e.g. `"IEEE/RSJ International Conference on Intelligent Robots and Systems"`). |
 | `search_term` | String / List | **Yes** | Query string(s) passed to OpenAlex Sources API or IEEE Xplore (e.g. `"IEEE/RSJ International Conference on Intelligent Robots and Systems"`). |
 | `short_name` | String | No | Clean short code used for folder/filename paths (e.g. `"IROS"`). If omitted, derived automatically from `search_term`. |
 | `openalex_source_id` | String | No | Optional explicit OpenAlex Source ID for this venue. |
@@ -207,7 +204,6 @@ exceptions:
 | `venue` | String | **Yes** | The venue short code or name to match against (case-insensitive). |
 | `years` | List of Integers | No | Specific years to apply this override to. If omitted, applies to all years for this venue. |
 | `openalex_source_id` | String | No | Explicit OpenAlex Source ID (e.g. `"S4363608614"`). Bypasses OpenAlex Sources API resolution. |
-| `search_term` | String | No | Custom search query passed to OpenAlex Sources API or IEEE Xplore search. |
 | `search_term` | String / List | No | Custom search query string(s) passed to OpenAlex Sources API or IEEE Xplore search. |
 | `doi_prefix` | String | No | Explicit publisher DOI prefix (e.g. `"10.1109/lra"` or `"10.1016"`). Bypasses dynamic DOI derivation. |
 
@@ -219,7 +215,6 @@ The CLI entrypoint can be run via `python3 main.py` or the `publication-lister` 
 
 ### 1. Bulk Execution (Recommended)
 
-Run the end-to-end 3-phase bulk pipeline using `batch.yaml`:
 Run the end-to-end 4-phase bulk pipeline using `batch.yaml`:
 
 ```bash
@@ -236,7 +231,6 @@ python3 main.py batch --config path/to/my_experiment.yaml
 python3 main.py batch --verbose
 ```
 
-### 2. Single-Venue CLI Subcommands
 ### 2. CSV Matrix Cleaning
 
 Clean raw matrix CSVs (prune standalone departments, merge sub-entities into parent organizations):
@@ -252,7 +246,22 @@ python3 main.py clean --input data/output/ICRA_affiliations_2017_2026.csv
 python3 main.py clean --all --model gemini-3.1-pro
 ```
 
-### 3. Single-Venue CLI Subcommands
+### 3. Web Visualisation Data Building
+
+Build the single-source-of-truth data manifest for the GitHub Pages web visualization:
+
+```bash
+# Build data manifest (visualisation/data/site_data.json) from cleaned CSVs
+python3 main.py build-visualisation
+
+# Aliases also supported
+python3 main.py visualize
+
+# Build automatically at the end of a bulk batch or pipeline run
+python3 main.py batch --build-visualisation
+```
+
+### 4. Single-Venue CLI Subcommands
 
 For targeted single-venue workflows, use individual subcommands:
 
@@ -273,19 +282,42 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
 
 ---
 
+## Interactive Web Dashboard & GitHub Pages Visualisation
+
+`publication-lister` includes a client-side web application hosted in the `visualisation/` directory designed for GitHub Pages deployment.
+
+### Features
+* **Single Source of Truth**: Reads cleaned CSV matrices (`data/cleaned_output/`), automatically merging split venue datasets (e.g. `IROS_affiliations_2016_2020.csv` + `IROS_affiliations_2017_2025.csv` into a unified `IROS` dataset).
+* **Venue Dashboard (`index.html`)**:
+  * **Venue Tabs**: Quick navigation between venues (ICRA, IROS, CVPR, NeurIPS, ECCV, T-RO, R-AL, CoRL, etc.).
+  * **Key Stat Cards**: Total Publications, Unique Institutions, Top Institution, Year Range, and OpenAlex Source links.
+  * **Interactive Line Chart**: Powered by Chart.js with hover-over exact counts.
+  * **Sortable CSV Table**: Filterable by institution name, aliases, or entity type (`UNI`, `LAB`, `COM`, `GOV`), with direct CSV download support.
+  * **Global Search Box**: Real-time institution search across all venues and merged aliases.
+* **Institution Detail View (`organisation.html?id=...`)**:
+  * Displays canonical metadata, ID, type badges, OpenAlex links, and expandable merged aliases.
+  * **Interactive Multi-Venue Line Chart**: Includes **checkbox toggles** to dynamically compare or isolate specific venue publication trends.
+  * **Multi-Venue Breakdown Table**: Complete year-by-year publication counts across all venues with CSV download.
+
+### Hosting on GitHub Pages
+1. Build the visualization manifest:
+   ```bash
+   python3 main.py build-visualisation
+   ```
+2. In your GitHub repository settings, go to **Pages** and set the source directory to `/visualisation` (or deploy the `visualisation/` folder to your `gh-pages` branch).
+
+---
+
 ## Understanding the File Structure
 
 | File / Path | Modifiable? | Description |
 | :--- | :---: | :--- |
-| [main.py](main.py) | No | Main CLI entrypoint; configures argument parsing and dispatches subcommands (`batch`, `extract`, `normalize`, `export`, `pipeline`). |
-| [main.py](main.py) | No | Main CLI entrypoint; configures argument parsing and dispatches subcommands (`batch`, `extract`, `normalize`, `export`, `clean`, `pipeline`). |
+| [main.py](main.py) | No | Main CLI entrypoint; configures argument parsing and dispatches subcommands (`batch`, `extract`, `normalize`, `export`, `clean`, `build-visualisation`, `pipeline`). |
 | [batch.example.yaml](batch.example.yaml) | Reference | Example YAML configuration template for bulk execution. |
-| `batch.yaml` | **Yes** | Root configuration file created by the user for defining target venues, year ranges, and exceptions. |
 | `batch.yaml` | **Yes** | Root configuration file created by the user for defining target venues, year ranges, model, and exceptions. |
 | [src/config.py](src/config.py) | No | Environment variable loading (`.env`) and directory path constants using `pathlib`. |
 | [src/logger.py](src/logger.py) | No | Centralized logging configuration routing messages to `stdout` and `logs/tracker.log`. |
 | [src/runner/batch_config.py](src/runner/batch_config.py) | No | Dataclass parser for validating `batch.yaml` structure and computing venue/year overrides. |
-| [src/runner/bulk_runner.py](src/runner/bulk_runner.py) | No | 3-Phase Bulk Runner Engine coordinating bulk extraction, global pooled normalization, and export. |
 | [src/runner/bulk_runner.py](src/runner/bulk_runner.py) | No | 4-Phase Bulk Runner Engine coordinating bulk extraction, global pooled normalization, matrix export, and matrix cleaning. |
 | [src/extractors/base.py](src/extractors/base.py) | No | Abstract base extractor handling raw JSON disk caching and cursor token checkpointing. |
 | [src/extractors/openalex.py](src/extractors/openalex.py) | No | OpenAlex REST API extractor featuring mandatory Gemini source resolution and DOI prefix fallback. |
@@ -294,12 +326,12 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
 | [src/extractors/conference_schedule.py](src/extractors/conference_schedule.py) | No | HTML program schedule extractor for unindexed upcoming proceedings. |
 | [src/registry/organization_registry.py](src/registry/organization_registry.py) | No | Manager for `data/canonical_organizations.json`. Implements alias searching and ID generation (`[TYPE:3]-[ID:5]-[SLUG:6]`). |
 | [src/normalizer/rate_limiter.py](src/normalizer/rate_limiter.py) | No | Token-Bucket rate limiter enforcing Gemini API RPM and TPM quotas. |
-| [src/normalizer/gemini_client.py](src/normalizer/gemini_client.py) | No | Gemini SDK client (`google-genai`) handling batched entity normalization, context caching, and 429 adaptive backoff. |
 | [src/normalizer/gemini_client.py](src/normalizer/gemini_client.py) | No | Gemini SDK client (`google-genai`) handling batched entity normalization, context caching, adaptive backoff, and 504 sub-batching. |
 | [src/normalizer/affiliation_normalizer.py](src/normalizer/affiliation_normalizer.py) | No | Normalization coordinator orchestrating local registry lookup and batched Gemini LLM resolution. |
-| [src/exporters/matrix_exporter.py](src/exporters/matrix_exporter.py) | No | Generates final matrix CSV files with paper deduplication and institution sorting. |
 | [src/exporters/matrix_exporter.py](src/exporters/matrix_exporter.py) | No | Generates matrix CSV files with paper deduplication and institution sorting. |
 | [src/cleaner/csv_cleaner.py](src/cleaner/csv_cleaner.py) | No | Post-cleaning module utilizing Gemini LLM + Python aggregation to prune department rows and merge sub-entities into `data/cleaned_output/`. |
+| [scripts/build_site_data.py](scripts/build_site_data.py) | No | Data builder script converting cleaned CSV matrices into `visualisation/data/site_data.json` for web visualization. |
+| `visualisation/` | Web App | GitHub Pages static web application directory containing `index.html`, `organisation.html`, CSS, JS, and data manifests. |
 | `data/canonical_organizations.json` | Persistent Data | Central persistent database of canonical institutional entities, types, and aliases. |
 | `data/openalex_sources_cache.json` | Persistent Cache | Resolved mapping of venue acronyms to OpenAlex Source IDs, DOI prefixes, and publication frequency. |
 
