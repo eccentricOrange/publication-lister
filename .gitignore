@@ -40,5 +40,6 @@ logs/
 *.log
 
 # Data directories (keep canonical registry, ignore raw/normalized/output contents)
-data
+data/
+!docs/data
 planning
