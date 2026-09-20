@@ -81,13 +81,17 @@ function switchVenue(vKey) {
         btn.classList.toggle('active', btn.textContent === vKey);
     });
 
-    // Update URL query string without reloading page
-    const newUrl = new URL(window.location.href);
-    newUrl.searchParams.set('venue', vKey);
-    window.history.pushState({ venue: vKey }, '', newUrl);
+    // Safely update URL query string without reloading page (catch file:// protocol pushState restriction)
+    try {
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('venue', vKey);
+        window.history.pushState({ venue: vKey }, '', newUrl);
+    } catch (e) {
+        // Ignore pushState security errors on file:// protocol
+    }
 
     const venue = siteData.venues[vKey];
-    currentRows = venue.rows || [];
+    currentRows = (venue && venue.rows) ? venue.rows : [];
 
     // Render Stats
     renderStats(venue);
@@ -102,14 +106,15 @@ function switchVenue(vKey) {
 }
 
 function renderStats(venue) {
-    document.getElementById('statTotalPubs').textContent = venue.total_publications.toLocaleString();
-    document.getElementById('statYearRange').textContent = `Spanning ${venue.year_range}`;
-    document.getElementById('statTotalInsts').textContent = venue.total_institutions.toLocaleString();
+    if (!venue) return;
+    document.getElementById('statTotalPubs').textContent = (venue.total_publications || 0).toLocaleString();
+    document.getElementById('statYearRange').textContent = `Spanning ${venue.year_range || ''}`;
+    document.getElementById('statTotalInsts').textContent = (venue.total_institutions || 0).toLocaleString();
 
     if (venue.top_institution) {
         document.getElementById('statTopInstName').textContent = venue.top_institution.canonical_name;
         document.getElementById('statTopInstName').title = venue.top_institution.canonical_name;
-        document.getElementById('statTopInstCount').textContent = `${venue.top_institution.total.toLocaleString()} publications`;
+        document.getElementById('statTopInstCount').textContent = `${(venue.top_institution.total || 0).toLocaleString()} publications`;
     } else {
         document.getElementById('statTopInstName').textContent = 'N/A';
         document.getElementById('statTopInstCount').textContent = '-';
@@ -128,13 +133,14 @@ function renderStats(venue) {
 }
 
 function renderChart(venue) {
+    if (!venue) return;
     const ctx = document.getElementById('venueChart').getContext('2d');
     if (currentChart) {
         currentChart.destroy();
     }
 
-    const years = venue.years;
-    const totals = years.map(y => venue.yearly_totals[y] || 0);
+    const years = venue.years || [];
+    const totals = years.map(y => (venue.yearly_totals && venue.yearly_totals[y]) || 0);
 
     currentChart = new Chart(ctx, {
         type: 'line',
@@ -197,7 +203,6 @@ function applyFiltersAndSort() {
     if (!venue) return;
 
     filteredRows = currentRows.filter(row => {
-        // Search filter (name + known aliases)
         let matchesSearch = true;
         if (searchTerm) {
             const nameMatch = row.canonical_name.toLowerCase().includes(searchTerm);
@@ -205,7 +210,6 @@ function applyFiltersAndSort() {
             matchesSearch = nameMatch || aliasMatch;
         }
 
-        // Type filter
         let matchesType = true;
         if (selectedType !== 'ALL') {
             matchesType = (row.entity_type === selectedType);
@@ -227,7 +231,6 @@ function applyFiltersAndSort() {
             valA = a.total || 0;
             valB = b.total || 0;
         } else {
-            // Year column
             valA = (a.years && a.years[sortColumn]) || 0;
             valB = (b.years && b.years[sortColumn]) || 0;
         }
@@ -241,15 +244,12 @@ function applyFiltersAndSort() {
 }
 
 function renderTable(venue) {
+    if (!venue) return;
     const headerRow = document.getElementById('tableHeaderRow');
     const tbody = document.getElementById('tableBody');
 
-    // Headers
     // Headers with resizer handles
     let headerHtml = `
-        <th data-col="name">Institution ${getSortIcon('name')}</th>
-        <th data-col="type">Type ${getSortIcon('type')}</th>
-        <th data-col="total">Total ${getSortIcon('total')}</th>
         <th data-col="name" style="width: ${getDefaultWidth('name')}px;">
             <span>Institution ${getSortIcon('name')}</span>
             <div class="col-resizer" title="Drag to resize column"></div>
@@ -263,8 +263,7 @@ function renderTable(venue) {
             <div class="col-resizer" title="Drag to resize column"></div>
         </th>
     `;
-    venue.years.forEach(yr => {
-        headerHtml += `<th data-col="${yr}">${yr} ${getSortIcon(yr)}</th>`;
+    (venue.years || []).forEach(yr => {
         headerHtml += `
             <th data-col="${yr}" style="width: ${getDefaultWidth(yr)}px;">
                 <span>${yr} ${getSortIcon(yr)}</span>
@@ -274,11 +273,8 @@ function renderTable(venue) {
     });
     headerRow.innerHTML = headerHtml;
 
-    // Attach click listeners to headers for sorting
-    // Attach click listeners to headers for sorting & dragging for resizing
+    // Attach click listeners for sorting & dragging for resizing
     headerRow.querySelectorAll('th').forEach(th => {
-        th.addEventListener('click', () => {
-            const col = th.getAttribute('data-col');
         const col = th.getAttribute('data-col');
         const resizer = th.querySelector('.col-resizer');
 
@@ -301,7 +297,7 @@ function renderTable(venue) {
     // Rows
     tbody.innerHTML = '';
     if (filteredRows.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${3 + venue.years.length}" style="text-align:center; padding:2rem; color: var(--text-muted);">No institutions matching criteria</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${3 + (venue.years ? venue.years.length : 0)}" style="text-align:center; padding:2rem; color: var(--text-muted);">No institutions matching criteria</td></tr>`;
         return;
     }
 
@@ -310,7 +306,6 @@ function renderTable(venue) {
         const badgeClass = `badge-${row.entity_type || 'OTHER'}`;
 
         let rowHtml = `
-            <td>
             <td title="${escapeHtml(row.canonical_name)}">
                 <a href="organisation.html?id=${encodeURIComponent(row.canonical_id)}" class="org-link">
                     ${escapeHtml(row.canonical_name)}
@@ -320,7 +315,7 @@ function renderTable(venue) {
             <td><strong>${(row.total || 0).toLocaleString()}</strong></td>
         `;
 
-        venue.years.forEach(yr => {
+        (venue.years || []).forEach(yr => {
             const cnt = (row.years && row.years[yr]) ? row.years[yr] : 0;
             rowHtml += `<td>${cnt ? cnt.toLocaleString() : '-'}</td>`;
         });
@@ -449,4 +444,3 @@ function setupGlobalSearch() {
 function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-

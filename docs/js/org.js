@@ -210,11 +210,8 @@ function renderOrgTable() {
     const headerRow = document.getElementById('orgTableHeaderRow');
     const tbody = document.getElementById('orgTableBody');
 
-    // Headers
     // Headers with column resizers
     let headerHtml = `
-        <th data-col="venue">Venue ${getSortIcon('venue')}</th>
-        <th data-col="total">Total Publications ${getSortIcon('total')}</th>
         <th data-col="venue" style="width: ${getDefaultWidthOrg('venue')}px;">
             <span>Venue ${getSortIcon('venue')}</span>
             <div class="col-resizer" title="Drag to resize column"></div>
@@ -225,7 +222,6 @@ function renderOrgTable() {
         </th>
     `;
     allYears.forEach(yr => {
-        headerHtml += `<th data-col="${yr}">${yr} ${getSortIcon(yr)}</th>`;
         headerHtml += `
             <th data-col="${yr}" style="width: ${getDefaultWidthOrg(yr)}px;">
                 <span>${yr} ${getSortIcon(yr)}</span>
@@ -236,8 +232,6 @@ function renderOrgTable() {
     headerRow.innerHTML = headerHtml;
 
     headerRow.querySelectorAll('th').forEach(th => {
-        th.addEventListener('click', () => {
-            const col = th.getAttribute('data-col');
         const col = th.getAttribute('data-col');
         const resizer = th.querySelector('.col-resizer');
 
@@ -289,10 +283,9 @@ function renderOrgTable() {
     rows.forEach(r => {
         const tr = document.createElement('tr');
         let rowHtml = `
-            <td>
             <td title="${escapeHtml(r.venue)}">
                 <a href="index.html?venue=${encodeURIComponent(r.venue)}" class="org-link">
-                    ${r.venue}
+                    ${escapeHtml(r.venue)}
                 </a>
             </td>
             <td><strong>${r.total.toLocaleString()}</strong></td>
@@ -424,4 +417,3 @@ function setupGlobalSearch() {
 function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-
