@@ -288,12 +288,15 @@ body {
     border-collapse: collapse;
     font-size: 0.875rem;
     text-align: left;
+    table-layout: fixed;
 }
 
 .data-table th, .data-table td {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border-color);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .data-table th {
@@ -305,6 +308,7 @@ body {
     z-index: 10;
     cursor: pointer;
     user-select: none;
+    padding-right: 1.25rem;
 }
 
 .data-table th:hover {
@@ -316,6 +320,34 @@ body {
     margin-left: 0.3rem;
     font-size: 0.75rem;
     opacity: 0.5;
+}
+
+/* Column Resizer Handle */
+.data-table th {
+    position: relative;
+}
+
+.col-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 8px;
+    bottom: 0;
+    cursor: col-resize;
+    user-select: none;
+    z-index: 20;
+    border-right: 2px solid transparent;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.col-resizer:hover, .col-resizer.resizing {
+    border-right-color: var(--primary);
+    background-color: rgba(37, 99, 235, 0.15);
+}
+
+body.column-resizing {
+    cursor: col-resize !important;
+    user-select: none !important;
 }
 
 .data-table tbody tr:hover {
@@ -429,5 +461,26 @@ body {
 
 .venue-toggle-item input[type="checkbox"] {
     cursor: pointer;
+}
+
+/* Persistent Bottom Disclaimer Banner */
+.disclaimer-banner {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #0f172a;
+    color: #cbd5e1;
+    font-size: 0.75rem;
+    padding: 0.4rem 1rem;
+    text-align: center;
+    box-shadow: 0 -2px 8px rgb(0 0 0 / 0.2);
+    z-index: 9999;
+    border-top: 1px solid #334155;
+    line-height: 1.4;
+}
+
+.disclaimer-banner strong {
+    color: #fbbf24;
 }
 

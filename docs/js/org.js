@@ -5,6 +5,22 @@ let venueDatasets = [];
 let sortCol = 'total';
 let sortDir = 'desc';
 let allYears = [];
+let columnWidthsOrg = {};
+
+// Load saved column widths from localStorage
+try {
+    const saved = localStorage.getItem('pub_lister_col_widths_org');
+    if (saved) columnWidthsOrg = JSON.parse(saved);
+} catch (e) {
+    columnWidthsOrg = {};
+}
+
+function getDefaultWidthOrg(colKey) {
+    if (columnWidthsOrg[colKey]) return columnWidthsOrg[colKey];
+    if (colKey === 'venue') return 220;
+    if (colKey === 'total') return 180;
+    return 85;
+}
 
 const COLOR_PALETTE = [
     '#2563eb', '#dc2626', '#16a34a', '#d97706', '#9333ea', 
@@ -195,18 +211,38 @@ function renderOrgTable() {
     const tbody = document.getElementById('orgTableBody');
 
     // Headers
+    // Headers with column resizers
     let headerHtml = `
         <th data-col="venue">Venue ${getSortIcon('venue')}</th>
         <th data-col="total">Total Publications ${getSortIcon('total')}</th>
+        <th data-col="venue" style="width: ${getDefaultWidthOrg('venue')}px;">
+            <span>Venue ${getSortIcon('venue')}</span>
+            <div class="col-resizer" title="Drag to resize column"></div>
+        </th>
+        <th data-col="total" style="width: ${getDefaultWidthOrg('total')}px;">
+            <span>Total Publications ${getSortIcon('total')}</span>
+            <div class="col-resizer" title="Drag to resize column"></div>
+        </th>
     `;
     allYears.forEach(yr => {
         headerHtml += `<th data-col="${yr}">${yr} ${getSortIcon(yr)}</th>`;
+        headerHtml += `
+            <th data-col="${yr}" style="width: ${getDefaultWidthOrg(yr)}px;">
+                <span>${yr} ${getSortIcon(yr)}</span>
+                <div class="col-resizer" title="Drag to resize column"></div>
+            </th>
+        `;
     });
     headerRow.innerHTML = headerHtml;
 
     headerRow.querySelectorAll('th').forEach(th => {
         th.addEventListener('click', () => {
             const col = th.getAttribute('data-col');
+        const col = th.getAttribute('data-col');
+        const resizer = th.querySelector('.col-resizer');
+
+        th.addEventListener('click', (e) => {
+            if (e.target.classList.contains('col-resizer')) return;
             if (sortCol === col) {
                 sortDir = sortDir === 'asc' ? 'desc' : 'asc';
             } else {
@@ -215,6 +251,10 @@ function renderOrgTable() {
             }
             renderOrgTable();
         });
+
+        if (resizer) {
+            setupResizerOrg(resizer, th, col, 'pub_lister_col_widths_org');
+        }
     });
 
     // Data rows
@@ -250,6 +290,7 @@ function renderOrgTable() {
         const tr = document.createElement('tr');
         let rowHtml = `
             <td>
+            <td title="${escapeHtml(r.venue)}">
                 <a href="index.html?venue=${encodeURIComponent(r.venue)}" class="org-link">
                     ${r.venue}
                 </a>
@@ -264,6 +305,42 @@ function renderOrgTable() {
 
         tr.innerHTML = rowHtml;
         tbody.appendChild(tr);
+    });
+}
+
+function setupResizerOrg(resizer, th, colKey, storageKey) {
+    resizer.addEventListener('click', (e) => e.stopPropagation());
+
+    resizer.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const startX = e.pageX;
+        const startWidth = th.offsetWidth;
+        const minWidth = colKey === 'venue' ? 120 : 60;
+
+        resizer.classList.add('resizing');
+        document.body.classList.add('column-resizing');
+
+        const onMouseMove = (moveEvent) => {
+            const deltaX = moveEvent.pageX - startX;
+            const newWidth = Math.max(minWidth, startWidth + deltaX);
+            th.style.width = `${newWidth}px`;
+            columnWidthsOrg[colKey] = newWidth;
+        };
+
+        const onMouseUp = () => {
+            resizer.classList.remove('resizing');
+            document.body.classList.remove('column-resizing');
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            try {
+                localStorage.setItem(storageKey, JSON.stringify(columnWidthsOrg));
+            } catch (err) {}
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
     });
 }
 

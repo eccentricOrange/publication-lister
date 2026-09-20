@@ -5,6 +5,23 @@ let currentRows = [];
 let filteredRows = [];
 let sortColumn = 'total';
 let sortDirection = 'desc';
+let columnWidths = {};
+
+// Load saved column widths from localStorage
+try {
+    const saved = localStorage.getItem('pub_lister_col_widths_app');
+    if (saved) columnWidths = JSON.parse(saved);
+} catch (e) {
+    columnWidths = {};
+}
+
+function getDefaultWidth(colKey) {
+    if (columnWidths[colKey]) return columnWidths[colKey];
+    if (colKey === 'name') return 380;
+    if (colKey === 'type') return 100;
+    if (colKey === 'total') return 110;
+    return 85;
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     try {
@@ -228,20 +245,45 @@ function renderTable(venue) {
     const tbody = document.getElementById('tableBody');
 
     // Headers
+    // Headers with resizer handles
     let headerHtml = `
         <th data-col="name">Institution ${getSortIcon('name')}</th>
         <th data-col="type">Type ${getSortIcon('type')}</th>
         <th data-col="total">Total ${getSortIcon('total')}</th>
+        <th data-col="name" style="width: ${getDefaultWidth('name')}px;">
+            <span>Institution ${getSortIcon('name')}</span>
+            <div class="col-resizer" title="Drag to resize column"></div>
+        </th>
+        <th data-col="type" style="width: ${getDefaultWidth('type')}px;">
+            <span>Type ${getSortIcon('type')}</span>
+            <div class="col-resizer" title="Drag to resize column"></div>
+        </th>
+        <th data-col="total" style="width: ${getDefaultWidth('total')}px;">
+            <span>Total ${getSortIcon('total')}</span>
+            <div class="col-resizer" title="Drag to resize column"></div>
+        </th>
     `;
     venue.years.forEach(yr => {
         headerHtml += `<th data-col="${yr}">${yr} ${getSortIcon(yr)}</th>`;
+        headerHtml += `
+            <th data-col="${yr}" style="width: ${getDefaultWidth(yr)}px;">
+                <span>${yr} ${getSortIcon(yr)}</span>
+                <div class="col-resizer" title="Drag to resize column"></div>
+            </th>
+        `;
     });
     headerRow.innerHTML = headerHtml;
 
     // Attach click listeners to headers for sorting
+    // Attach click listeners to headers for sorting & dragging for resizing
     headerRow.querySelectorAll('th').forEach(th => {
         th.addEventListener('click', () => {
             const col = th.getAttribute('data-col');
+        const col = th.getAttribute('data-col');
+        const resizer = th.querySelector('.col-resizer');
+
+        th.addEventListener('click', (e) => {
+            if (e.target.classList.contains('col-resizer')) return;
             if (sortColumn === col) {
                 sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
             } else {
@@ -250,6 +292,10 @@ function renderTable(venue) {
             }
             applyFiltersAndSort();
         });
+
+        if (resizer) {
+            setupResizer(resizer, th, col, 'pub_lister_col_widths_app');
+        }
     });
 
     // Rows
@@ -265,6 +311,7 @@ function renderTable(venue) {
 
         let rowHtml = `
             <td>
+            <td title="${escapeHtml(row.canonical_name)}">
                 <a href="organisation.html?id=${encodeURIComponent(row.canonical_id)}" class="org-link">
                     ${escapeHtml(row.canonical_name)}
                 </a>
@@ -280,6 +327,42 @@ function renderTable(venue) {
 
         tr.innerHTML = rowHtml;
         tbody.appendChild(tr);
+    });
+}
+
+function setupResizer(resizer, th, colKey, storageKey) {
+    resizer.addEventListener('click', (e) => e.stopPropagation());
+
+    resizer.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+
+        const startX = e.pageX;
+        const startWidth = th.offsetWidth;
+        const minWidth = (colKey === 'name' || colKey === 'venue') ? 150 : 60;
+
+        resizer.classList.add('resizing');
+        document.body.classList.add('column-resizing');
+
+        const onMouseMove = (moveEvent) => {
+            const deltaX = moveEvent.pageX - startX;
+            const newWidth = Math.max(minWidth, startWidth + deltaX);
+            th.style.width = `${newWidth}px`;
+            columnWidths[colKey] = newWidth;
+        };
+
+        const onMouseUp = () => {
+            resizer.classList.remove('resizing');
+            document.body.classList.remove('column-resizing');
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            try {
+                localStorage.setItem(storageKey, JSON.stringify(columnWidths));
+            } catch (err) {}
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
     });
 }
 
