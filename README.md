@@ -238,19 +238,25 @@ python3 main.py batch --verbose
 Clean raw matrix CSVs (prune standalone departments, merge sub-entities into parent organizations):
 
 ```bash
-# Clean all active matrix CSVs in data/output/ into data/cleaned_output/ (obeys batch.yaml if present)
+# Clean all active matrix CSVs in data/output/ into data/cleaned_output/ (obeys batch.yaml if present, recursive up to 3 passes by default)
 python3 main.py clean --all
+
+# Refine existing cleaned CSVs recursively using data/cleaned_output/ as starting point
+python3 main.py clean --all --refine
+
+# Specify maximum recursive cleaning passes (e.g., 5 passes)
+python3 main.py clean --all --max-passes 5
 
 # Specify a custom batch configuration file
 python3 main.py clean --all --config path/to/my_batch.yaml
 
 # Clean a specific CSV file
-python3 main.py clean --input data/output/ICRA_affiliations_2017_2026.csv
+python3 main.py clean --input data/output/ICRA_affiliations_2017_2025.csv
 
 # Clean using a specific Gemini LLM model
 python3 main.py clean --all --model gemini-3.1-pro
 
-# Force re-cleaning ignoring existing cleaned files and checkpoints
+# Force re-cleaning recursively starting from raw input files
 python3 main.py clean --all --force
 ```
 

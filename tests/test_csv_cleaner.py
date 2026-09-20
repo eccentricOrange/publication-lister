@@ -239,6 +239,68 @@ class TestCSVCleaner(unittest.TestCase):
         self.assertIn("ICRA_affiliations_2023_2024.csv", cleaned_names)
         self.assertNotIn("IROS_affiliations_2023_2024.csv", cleaned_names)
 
+    def test_csv_cleaner_refine_and_recursive_convergence(self):
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.cleaned_dir.mkdir(parents=True, exist_ok=True)
+        input_csv = self.out_dir / "REFINE_affiliations_2023_2024.csv"
+        cleaned_csv = self.cleaned_dir / "REFINE_affiliations_2023_2024.csv"
+
+        headers = ["canonical_id", "canonical_name", "entity_type", "2023", "total"]
+        raw_rows = [
+            {"canonical_id": "UNI-00001-STANFD", "canonical_name": "Stanford University", "entity_type": "UNI", "2023": "5", "total": "5"},
+        ]
+        with open(input_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=headers)
+            w.writeheader()
+            w.writerows(raw_rows)
+
+        # Existing cleaned CSV file
+        cleaned_rows = [
+            {"canonical_id": "UNI-00001-STANFD", "canonical_name": "Stanford University", "entity_type": "UNI", "2023": "5", "total": "5"},
+            {"canonical_id": "UNKNOWN-001", "canonical_name": "Department of Physics", "entity_type": "UNI", "2023": "1", "total": "1"},
+        ]
+        with open(cleaned_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=headers)
+            w.writeheader()
+            w.writerows(cleaned_rows)
+
+        mock_gemini = MagicMock()
+        mock_gemini.api_key = "dummy_key"
+        mock_gemini.rate_limiter = MagicMock()
+
+        # Pass 1: triage department on pass 1, 0 problematic on pass 2
+        pass1_json_1 = {"problematic_names": ["Department of Physics"]}
+        pass2_json_1 = {"prune_ids": ["UNKNOWN-001"], "merges": [], "type_fixes": {}}
+        pass1_json_2 = {"problematic_names": []}  # pass 2 of recursion -> 0 problematic names -> converge
+
+        call_count = {"p1": 0}
+        def side_effect(model, contents, config):
+            prompt_text = contents[0] if isinstance(contents, list) else ""
+            mock_resp = MagicMock()
+            if "triage assistant" in prompt_text:
+                call_count["p1"] += 1
+                if call_count["p1"] == 1:
+                    mock_resp.text = json.dumps(pass1_json_1)
+                else:
+                    mock_resp.text = json.dumps(pass1_json_2)
+            else:
+                mock_resp.text = json.dumps(pass2_json_1)
+            return mock_resp
+
+        mock_gemini._extract_response_text.side_effect = lambda resp: resp.text
+        mock_gemini.client.models.generate_content.side_effect = side_effect
+
+        cleaner = CSVCleaner(registry=self.registry, gemini_client=mock_gemini, output_dir=self.cleaned_dir)
+
+        # Calling clean_file with refine=True should use cleaned_csv as starting point and prune UNKNOWN-001
+        res = cleaner.clean_file(input_csv, force=False, refine=True)
+        self.assertEqual(res, cleaned_csv)
+
+        with open(cleaned_csv, "r", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+            self.assertEqual(len(reader), 1)
+            self.assertEqual(reader[0]["canonical_name"], "Stanford University")
+
 
 if __name__ == "__main__":
     unittest.main()

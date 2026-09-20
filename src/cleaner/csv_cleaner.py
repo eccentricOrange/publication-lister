@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT_PASS1_TRIAGE = """You are an expert academic metadata triage assistant.
 Your task is to review a list of raw institution names and identify ALL entries that have potential data quality issues:
 1. DUPLICATES / VARIANTS: Multiple entries referring to the same parent institution (e.g., 'Google Brain' & 'Google LLC', 'MIT CSAIL' & 'MIT').
+1. DUPLICATES / VARIANTS: Multiple entries referring to the same parent institution (e.g., 'Google Brain' & 'Google LLC', 'MIT CSAIL' & 'MIT', 'UCLA Vision Lab' & 'University of California, Los Angeles').
 2. ONES TO BE PRUNED: Standalone department/faculty names lacking parent institutions (e.g., 'Department of Computer Science', 'Faculty of Engineering') or generic noise ('UNKNOWN', 'N/A', 'Independent Researcher').
 3. MIX-UPS / HIERARCHY ISSUES: Entries with potential system vs campus confusion (e.g., 'University of California' vs 'University of California, San Diego') or miscategorized entities.
+3. MIX-UPS / HIERARCHY ISSUES: Entries with potential system vs campus confusion (e.g., 'University of California' vs 'University of California, San Diego'), university labs misclassified as standalone LAB entities, or miscategorized entities.
 
 INSTRUCTIONS:
 Return ONLY a valid JSON object containing a list of problematic name strings from the input:
@@ -23,6 +25,8 @@ Return ONLY a valid JSON object containing a list of problematic name strings fr
     "Department of Computer Science",
     "Google Brain",
     "University of California"
+    "University of California",
+    "UCLA Vision Lab"
   ]
 }
 """
@@ -33,16 +37,21 @@ You will be provided with a list of problematic institutional entries along with
 INSTITUTIONAL HIERARCHY RULES:
 1. UNIVERSITIES:
    - Distinct campuses remain distinct entities (e.g., 'University of California, Los Angeles' vs. 'University of California, San Diego'). Campuses are NOT rolled up into parent university systems.
+   - Internal university departments, faculties, labs, and research centers (e.g., 'UCLA Vision Lab', 'MIT CSAIL', 'Department of Robotics') MUST be merged into their parent university campus entity (e.g., 'University of California, Los Angeles', 'Massachusetts Institute of Technology') and assigned entity_type 'UNI'.
 2. COMPANIES:
    - Global, regional, or departmental subsidiaries aggregate into a single parent entity (e.g., Google India, Google Brain, Google Zurich -> 'Google LLC'; FAIR -> 'Meta Platforms, Inc.').
 3. LABS & GOVERNMENT AGENCIES:
    - Independent research institutes and national labs remain distinct entities (e.g., Max Planck Institutes, NASA Jet Propulsion Laboratory, CNRS).
+   - Truly independent research institutes, government agencies, and national labs remain distinct entities (e.g., Max Planck Institutes, NASA Jet Propulsion Laboratory, CNRS, SRI International). University-affiliated labs are merged into their university campus as UNI.
 
 INSTRUCTIONS:
 Analyze the problematic entries and determine the cleaning actions:
 1. PRUNING: Identify entries to prune (standalone department names without parent institution, generic noise like 'UNKNOWN', 'N/A').
 2. MERGING: Group sub-entities, department variants, or corporate subsidiaries under their official parent canonical institution name.
 3. CATEGORIZATION FIXES: Correct any miscategorized entity types (entity_type must be one of ['UNI', 'COM', 'LAB', 'GOV']). E.g. if an academic university was wrongly marked 'GOV' or 'COM', correct it to 'UNI'.
+1. PRUNING: Identify entries to prune (standalone generic department names without parent institution e.g. 'Department of Computer Science' with no university specified, or generic noise like 'UNKNOWN', 'N/A').
+2. MERGING: Group sub-entities, university labs/departments, or corporate subsidiaries under their official parent canonical institution name.
+3. CATEGORIZATION FIXES: Correct any miscategorized entity types (entity_type must be one of ['UNI', 'COM', 'LAB', 'GOV']). E.g. if an academic university or university lab was marked 'LAB', 'GOV', or 'COM', correct it to 'UNI'.
 
 OUTPUT FORMAT:
 Return ONLY a valid JSON object:
@@ -189,12 +198,16 @@ class CSVCleaner:
         input_csv_path: Path,
         output_csv_path: Optional[Path] = None,
         force: bool = False,
+        refine: bool = False,
+        max_passes: int = 3,
     ) -> Path:
         """
-        Cleans a matrix CSV file using a 2-pass workflow with full Pause/Resume checkpointing & skip caching:
-        1. Pass 1: Send plain institution names to Gemini to triage problematic entries.
-        2. Pass 2: Enrich problematic entries with aliases & entity types; query Gemini with hierarchy rules.
-        3. Pass 3: Deterministically aggregate paper counts, prune rows, and fix entity types in Python.
+        Cleans a matrix CSV file recursively using a 2-pass workflow until Gemini suggests no further changes:
+        1. If output file exists and neither force nor refine is set, skip.
+        2. Determine starting file: existing cleaned file if refine=True, else raw input file.
+        3. Iterate Pass 1 (Triage) -> Pass 2 (Deep Analysis) -> Pass 3 (Python Aggregation).
+        4. If changes occur, save to output file and re-run using that cleaned file as starting point.
+        5. Stop when Gemini proposes no further changes or max_passes is reached.
         """
         input_path = Path(input_csv_path)
         if not input_path.exists():
@@ -208,22 +221,34 @@ class CSVCleaner:
         output_path = Path(output_csv_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # File-Level Skip Caching
-        if output_path.exists() and not force:
-            logger.info(f"Cleaned matrix CSV already exists at {output_path.resolve()}. Skipping LLM cleaning pass (use --force to re-clean).")
-            return output_path
+        # Determine start file and handle skip logic
+        if output_path.exists():
+            if not force and not refine:
+                logger.info(
+                    f"Cleaned matrix CSV already exists at {output_path.resolve()}. "
+                    f"Skipping LLM cleaning pass (use --force or --refine to re-clean)."
+                )
+                return output_path
+            elif refine and not force:
+                logger.info(f"Refining existing cleaned matrix CSV at {output_path.resolve()} recursively...")
+                current_file = output_path
+            else:
+                logger.info(f"Force cleaning matrix CSV from raw source at {input_path.resolve()} recursively...")
+                current_file = input_path
+        else:
+            logger.info(f"Starting CSV cleaning for {input_path.resolve()} -> {output_path.resolve()}")
+            current_file = input_path
 
-        # Chunk-Level Checkpointing Setup
         checkpoint_path = output_path.parent / f".checkpoint_{input_path.name}.json"
-        checkpoint_data: Dict[str, Any] = {}
-        if checkpoint_path.exists():
-            try:
-                with open(checkpoint_path, "r", encoding="utf-8") as cp_file:
-                    checkpoint_data = json.load(cp_file)
-                logger.info(f"Resuming CSV cleaning from checkpoint at {checkpoint_path.resolve()}")
-            except Exception as e:
-                logger.warning(f"Could not read existing checkpoint at {checkpoint_path}: {e}")
-                checkpoint_data = {}
+
+        def load_checkpoint() -> Dict[str, Any]:
+            if checkpoint_path.exists():
+                try:
+                    with open(checkpoint_path, "r", encoding="utf-8") as cp_file:
+                        return json.load(cp_file)
+                except Exception as e:
+                    logger.warning(f"Could not read existing checkpoint at {checkpoint_path}: {e}")
+            return {}
 
         def save_checkpoint(cp_data: Dict[str, Any]) -> None:
             try:
@@ -232,31 +257,12 @@ class CSVCleaner:
             except Exception as cp_err:
                 logger.warning(f"Could not save checkpoint to {checkpoint_path}: {cp_err}")
 
-        logger.info(f"Starting CSV cleaning for {input_path.resolve()} -> {output_path.resolve()}")
-
-        with open(input_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = list(reader.fieldnames or [])
-            rows = list(reader)
-
-        if not rows:
-            logger.warning(f"Input CSV {input_path} is empty. Writing empty file to {output_path}")
-            with open(output_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-            return output_path
-
-        # Identify metadata fields and year fields
-        meta_fields = {"canonical_id", "canonical_name", "entity_type", "total"}
-        year_fields = [fn for fn in fieldnames if fn not in meta_fields]
-
-        if not self.gemini_client.api_key:
-            logger.warning(f"GEMINI_API_KEY missing. Copying original CSV {input_path} to {output_path} without LLM cleaning.")
-            with open(output_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-            return output_path
+        def clear_checkpoint() -> None:
+            if checkpoint_path.exists():
+                try:
+                    checkpoint_path.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not remove checkpoint file {checkpoint_path}: {e}")
 
         from google.genai import types
         config = types.GenerateContentConfig(
@@ -265,220 +271,262 @@ class CSVCleaner:
             should_return_http_response=True,
         )
 
-        # PASS 1: Lightweight Triage - Send ONLY plain list of institution names
-        raw_names = [r.get("canonical_name", "").strip() for r in rows if r.get("canonical_name", "").strip()]
-        name_chunk_size = 150
-        name_chunks = [raw_names[i : i + name_chunk_size] for i in range(0, len(raw_names), name_chunk_size)]
+        pass_num = 1
+        checkpoint_data = load_checkpoint()
 
-        all_problematic_names: Set[str] = set(checkpoint_data.get("all_problematic_names", []))
-        pass1_val = checkpoint_data.get("pass1_completed_chunks", 0)
-        pass1_start_chunk = len(pass1_val) if isinstance(pass1_val, list) else int(pass1_val)
+        while pass_num <= max_passes:
+            logger.info(f"=== Recursive Cleaning Pass {pass_num} for {input_path.name} (Source: {current_file.name}) ===")
 
-        if pass1_start_chunk < len(name_chunks):
-            logger.info(f"Pass 1: Querying Gemini LLM with {len(raw_names)} plain names across {len(name_chunks)} chunk(s) (resuming from chunk {pass1_start_chunk + 1})...")
+            with open(current_file, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
 
-            for idx in range(pass1_start_chunk, len(name_chunks)):
-                chunk = name_chunks[idx]
-                logger.info(f"Pass 1 (Chunk {idx + 1}/{len(name_chunks)}): Triaging {len(chunk)} plain institution names...")
-                prob = self._query_pass1_chunk(chunk, config)
-                for p in prob:
-                    if str(p).strip():
-                        all_problematic_names.add(str(p).strip().lower())
+            if not rows:
+                logger.warning(f"CSV file {current_file} is empty. Writing empty file to {output_path}")
+                with open(output_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                clear_checkpoint()
+                return output_path
 
-                checkpoint_data["pass1_completed_chunks"] = idx + 1
-                checkpoint_data["all_problematic_names"] = sorted(list(all_problematic_names))
-                save_checkpoint(checkpoint_data)
-        else:
-            logger.info(f"Pass 1: Loaded {len(all_problematic_names)} triaged problematic names from checkpoint.")
+            meta_fields = {"canonical_id", "canonical_name", "entity_type", "total"}
+            year_fields = [fn for fn in fieldnames if fn not in meta_fields]
 
-        logger.info(f"Pass 1 Complete: Identified {len(all_problematic_names)} potential problematic name entries.")
+            if not self.gemini_client.api_key:
+                logger.warning(f"GEMINI_API_KEY missing. Copying {current_file} to {output_path} without LLM cleaning.")
+                with open(output_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+                clear_checkpoint()
+                return output_path
 
-        # Filter original rows to build rich context for ONLY problematic entries
-        problematic_rows: List[Dict[str, Any]] = []
-        problematic_entries_payload: List[Dict[str, Any]] = []
+            # PASS 1: Lightweight Triage
+            raw_names = [r.get("canonical_name", "").strip() for r in rows if r.get("canonical_name", "").strip()]
+            name_chunk_size = 150
+            name_chunks = [raw_names[i : i + name_chunk_size] for i in range(0, len(raw_names), name_chunk_size)]
 
-        for r in rows:
-            c_id = (r.get("canonical_id") or "").strip()
-            c_name = (r.get("canonical_name") or "").strip()
-            e_type = (r.get("entity_type") or "UNI").strip()
+            all_problematic_names: Set[str] = set(checkpoint_data.get("all_problematic_names", []))
+            pass1_val = checkpoint_data.get("pass1_completed_chunks", 0)
+            pass1_start_chunk = len(pass1_val) if isinstance(pass1_val, list) else int(pass1_val)
 
-            if c_name.lower() in all_problematic_names or c_id.lower() in all_problematic_names:
-                problematic_rows.append(r)
-                aliases = []
-                if c_id:
-                    reg_entry = self.registry._lookup_map.get(c_id.upper()) or self.registry.find_by_string(c_id)
-                    if reg_entry:
-                        aliases = reg_entry.get("known_aliases", [])
+            if pass1_start_chunk < len(name_chunks):
+                logger.info(f"Pass 1 (Triage): Querying Gemini LLM with {len(raw_names)} names across {len(name_chunks)} chunk(s) (resuming from chunk {pass1_start_chunk + 1})...")
+                for idx in range(pass1_start_chunk, len(name_chunks)):
+                    chunk = name_chunks[idx]
+                    logger.info(f"Pass 1 (Chunk {idx + 1}/{len(name_chunks)}): Triaging {len(chunk)} plain institution names...")
+                    prob = self._query_pass1_chunk(chunk, config)
+                    for p in prob:
+                        if str(p).strip():
+                            all_problematic_names.add(str(p).strip().lower())
 
-                problematic_entries_payload.append({
-                    "canonical_id": c_id,
-                    "canonical_name": c_name,
-                    "entity_type": e_type,
-                    "known_aliases": aliases,
-                })
+                    checkpoint_data["pass1_completed_chunks"] = idx + 1
+                    checkpoint_data["all_problematic_names"] = sorted(list(all_problematic_names))
+                    save_checkpoint(checkpoint_data)
 
-        # PASS 2: Targeted Deep Analysis - Send enriched problematic entries + Hierarchy Rules to Gemini
-        entry_chunk_size = 80
-        entry_chunks = [problematic_entries_payload[i : i + entry_chunk_size] for i in range(0, len(problematic_entries_payload), entry_chunk_size)]
+            logger.info(f"Pass 1 Complete: Identified {len(all_problematic_names)} potential problematic name entries.")
 
-        all_prune_ids: List[str] = checkpoint_data.get("all_prune_ids", [])
-        all_merges: List[Dict[str, Any]] = checkpoint_data.get("all_merges", [])
-        all_type_fixes: Dict[str, str] = checkpoint_data.get("all_type_fixes", {})
+            if not all_problematic_names:
+                logger.info(f"Gemini suggested no further problematic entries on pass {pass_num}. Recursive cleaning converged!")
+                if current_file != output_path or not output_path.exists():
+                    with open(output_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                clear_checkpoint()
+                return output_path
 
-        pass2_val = checkpoint_data.get("pass2_completed_chunks", 0)
-        pass2_start_chunk = len(pass2_val) if isinstance(pass2_val, list) else int(pass2_val)
+            # Prepare problematic entries payload for Pass 2
+            problematic_entries_payload: List[Dict[str, Any]] = []
+            for r in rows:
+                c_id = (r.get("canonical_id") or "").strip()
+                c_name = (r.get("canonical_name") or "").strip()
+                e_type = (r.get("entity_type") or "UNI").strip()
 
-        if pass2_start_chunk < len(entry_chunks):
-            logger.info(f"Pass 2: Performing deep analysis on {len(problematic_entries_payload)} problematic entries (resuming from chunk {pass2_start_chunk + 1})...")
+                if c_name.lower() in all_problematic_names or c_id.lower() in all_problematic_names:
+                    aliases = []
+                    if c_id:
+                        reg_entry = self.registry._lookup_map.get(c_id.upper()) or self.registry.find_by_string(c_id)
+                        if reg_entry:
+                            aliases = reg_entry.get("known_aliases", [])
 
-            for idx in range(pass2_start_chunk, len(entry_chunks)):
-                chunk = entry_chunks[idx]
-                logger.info(f"Pass 2 (Chunk {idx + 1}/{len(entry_chunks)}): Deep analyzing {len(chunk)} entries...")
-                p_ids, m_groups, t_fixes = self._query_pass2_deep_analysis(chunk, config)
-                all_prune_ids.extend(p_ids)
-                all_merges.extend(m_groups)
-                all_type_fixes.update(t_fixes)
+                    problematic_entries_payload.append({
+                        "canonical_id": c_id,
+                        "canonical_name": c_name,
+                        "entity_type": e_type,
+                        "known_aliases": aliases,
+                    })
 
-                checkpoint_data["pass2_completed_chunks"] = idx + 1
-                checkpoint_data["all_prune_ids"] = all_prune_ids
-                checkpoint_data["all_merges"] = all_merges
-                checkpoint_data["all_type_fixes"] = all_type_fixes
-                save_checkpoint(checkpoint_data)
-        else:
-            logger.info(f"Pass 2: Loaded deep analysis results ({len(all_prune_ids)} prunes, {len(all_merges)} merges, {len(all_type_fixes)} type fixes) from checkpoint.")
+            # PASS 2: Targeted Deep Analysis
+            entry_chunk_size = 80
+            entry_chunks = [problematic_entries_payload[i : i + entry_chunk_size] for i in range(0, len(problematic_entries_payload), entry_chunk_size)]
 
-        prune_set: Set[str] = {str(pid).strip().lower() for pid in all_prune_ids if pid}
+            all_prune_ids: List[str] = checkpoint_data.get("all_prune_ids", [])
+            all_merges: List[Dict[str, Any]] = checkpoint_data.get("all_merges", [])
+            all_type_fixes: Dict[str, str] = checkpoint_data.get("all_type_fixes", {})
 
-        # PASS 3: Local Registry Target Mapping & Deterministic Python Execution
-        source_id_to_target: Dict[str, Tuple[str, str, str]] = {}
+            pass2_val = checkpoint_data.get("pass2_completed_chunks", 0)
+            pass2_start_chunk = len(pass2_val) if isinstance(pass2_val, list) else int(pass2_val)
 
-        for m in all_merges:
-            if not isinstance(m, dict):
-                continue
-            parent_name = (m.get("target_parent_name") or "").strip()
-            sources = m.get("source_ids") or []
-            if not parent_name or not sources:
-                continue
+            if pass2_start_chunk < len(entry_chunks):
+                logger.info(f"Pass 2 (Deep Analysis): Analyzing {len(problematic_entries_payload)} entries across {len(entry_chunks)} chunk(s)...")
+                for idx in range(pass2_start_chunk, len(entry_chunks)):
+                    chunk = entry_chunks[idx]
+                    logger.info(f"Pass 2 (Chunk {idx + 1}/{len(entry_chunks)}): Deep analyzing {len(chunk)} entries...")
+                    p_ids, m_groups, t_fixes = self._query_pass2_deep_analysis(chunk, config)
+                    all_prune_ids.extend(p_ids)
+                    all_merges.extend(m_groups)
+                    all_type_fixes.update(t_fixes)
 
-            match = self.registry.find_by_string(parent_name)
-            if match:
-                c_id = match.get("canonical_id", "")
-                c_name = match.get("canonical_name", parent_name)
-                e_type = match.get("entity_type", "UNI")
-            else:
-                c_id = "UNI-00000-CUSTOM"
-                c_name = parent_name
-                e_type = "UNI"
+                    checkpoint_data["pass2_completed_chunks"] = idx + 1
+                    checkpoint_data["all_prune_ids"] = all_prune_ids
+                    checkpoint_data["all_merges"] = all_merges
+                    checkpoint_data["all_type_fixes"] = all_type_fixes
+                    save_checkpoint(checkpoint_data)
 
-            target_tuple = (c_id, c_name, e_type)
-            for sid in sources:
-                sid_clean = str(sid).strip().lower()
-                if sid_clean:
-                    source_id_to_target[sid_clean] = target_tuple
+            if not all_prune_ids and not all_merges and not all_type_fixes:
+                logger.info(f"Gemini suggested no further cleaning actions (prunes/merges/type fixes) on pass {pass_num}. Recursive cleaning converged!")
+                if current_file != output_path or not output_path.exists():
+                    with open(output_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                clear_checkpoint()
+                return output_path
 
-            logger.info(f"Pass 3: Mapped merge parent '{parent_name}' -> Canonical: {c_id} ({c_name}) for {len(sources)} source IDs")
+            # PASS 3: Local Registry Target Mapping & Deterministic Python Execution
+            prune_set: Set[str] = {str(pid).strip().lower() for pid in all_prune_ids if pid}
+            source_id_to_target: Dict[str, Tuple[str, str, str]] = {}
 
-        # Deterministically aggregate, prune, and apply entity_type fixes in Python
-        cleaned_map: Dict[Tuple[str, str, str], Dict[str, int]] = {}
-        unmerged_rows: List[Dict[str, Any]] = []
+            for m in all_merges:
+                if not isinstance(m, dict):
+                    continue
+                parent_name = (m.get("target_parent_name") or "").strip()
+                sources = m.get("source_ids") or []
+                if not parent_name or not sources:
+                    continue
 
-        type_fixes_map: Dict[str, str] = {str(k).strip().lower(): str(v).strip().upper() for k, v in all_type_fixes.items()}
+                match = self.registry.find_by_string(parent_name)
+                if match:
+                    c_id = match.get("canonical_id", "")
+                    c_name = match.get("canonical_name", parent_name)
+                    e_type = match.get("entity_type", "UNI")
+                else:
+                    c_id = "UNI-00000-CUSTOM"
+                    c_name = parent_name
+                    e_type = "UNI"
 
-        for r in rows:
-            raw_id = (r.get("canonical_id") or "").strip()
-            raw_name = (r.get("canonical_name") or "").strip()
-            raw_type = (r.get("entity_type") or "UNI").strip()
+                target_tuple = (c_id, c_name, e_type)
+                for sid in sources:
+                    sid_clean = str(sid).strip().lower()
+                    if sid_clean:
+                        source_id_to_target[sid_clean] = target_tuple
 
-            # Apply categorization fix if specified
-            if raw_id.lower() in type_fixes_map:
-                raw_type = type_fixes_map[raw_id.lower()]
-            elif raw_name.lower() in type_fixes_map:
-                raw_type = type_fixes_map[raw_name.lower()]
+            cleaned_map: Dict[Tuple[str, str, str], Dict[str, int]] = {}
+            unmerged_rows: List[Dict[str, Any]] = []
+            type_fixes_map: Dict[str, str] = {str(k).strip().lower(): str(v).strip().upper() for k, v in all_type_fixes.items()}
 
-            # Check if row should be pruned
-            if raw_id.lower() in prune_set or raw_name.lower() in prune_set:
-                logger.info(f"Pruning useless row: '{raw_name}' ({raw_id})")
-                continue
+            for r in rows:
+                raw_id = (r.get("canonical_id") or "").strip()
+                raw_name = (r.get("canonical_name") or "").strip()
+                raw_type = (r.get("entity_type") or "UNI").strip()
 
-            # Check if row belongs to a merge group
-            target_key = source_id_to_target.get(raw_id.lower()) or source_id_to_target.get(raw_name.lower())
+                if raw_id.lower() in type_fixes_map:
+                    raw_type = type_fixes_map[raw_id.lower()]
+                    new_type = type_fixes_map[raw_id.lower()]
+                    if new_type != raw_type:
+                        logger.info(f"Pass {pass_num}: Categorization fix for '{raw_name}' ({raw_id}): {raw_type} -> {new_type}")
+                    raw_type = new_type
+                elif raw_name.lower() in type_fixes_map:
+                    raw_type = type_fixes_map[raw_name.lower()]
+                    new_type = type_fixes_map[raw_name.lower()]
+                    if new_type != raw_type:
+                        logger.info(f"Pass {pass_num}: Categorization fix for '{raw_name}' ({raw_id}): {raw_type} -> {new_type}")
+                    raw_type = new_type
 
-            if target_key:
-                c_id, c_name, c_type = target_key
-                if c_id.lower() in type_fixes_map:
-                    c_type = type_fixes_map[c_id.lower()]
-                elif c_name.lower() in type_fixes_map:
-                    c_type = type_fixes_map[c_name.lower()]
+                if raw_id.lower() in prune_set or raw_name.lower() in prune_set:
+                    logger.info(f"Pass {pass_num}: Pruning row '{raw_name}' ({raw_id})")
+                    continue
 
-                final_key = (c_id, c_name, c_type)
+                target_key = source_id_to_target.get(raw_id.lower()) or source_id_to_target.get(raw_name.lower())
 
-                if final_key not in cleaned_map:
-                    cleaned_map[final_key] = {y: 0 for y in year_fields}
+                if target_key:
+                    c_id, c_name, c_type = target_key
+                    if c_id.lower() in type_fixes_map:
+                        c_type = type_fixes_map[c_id.lower()]
+                    elif c_name.lower() in type_fixes_map:
+                        c_type = type_fixes_map[c_name.lower()]
 
+                    logger.info(f"Pass {pass_num}: Merging row '{raw_name}' ({raw_id}) -> '{c_name}' ({c_id}, {c_type})")
+
+                    final_key = (c_id, c_name, c_type)
+                    if final_key not in cleaned_map:
+                        cleaned_map[final_key] = {y: 0 for y in year_fields}
+
+                    for y in year_fields:
+                        val = r.get(y, 0)
+                        cleaned_map[final_key][y] += int(val) if str(val).isdigit() else 0
+                else:
+                    row_copy = dict(r)
+                    row_copy["entity_type"] = raw_type
+                    unmerged_rows.append(row_copy)
+
+            final_output_rows: List[Dict[str, Any]] = []
+            for (c_id, c_name, e_type), year_counts in cleaned_map.items():
+                row_dict = {"canonical_id": c_id, "canonical_name": c_name, "entity_type": e_type}
+                tot = 0
+                for y in year_fields:
+                    cnt = year_counts[y]
+                    row_dict[y] = cnt
+                    tot += cnt
+                row_dict["total"] = tot
+                if tot > 0:
+                    final_output_rows.append(row_dict)
+
+            for r in unmerged_rows:
+                c_id = r.get("canonical_id", "")
+                c_name = r.get("canonical_name", "")
+                e_type = r.get("entity_type", "UNI")
+                row_dict = {"canonical_id": c_id, "canonical_name": c_name, "entity_type": e_type}
+                tot = 0
                 for y in year_fields:
                     val = r.get(y, 0)
-                    cleaned_map[final_key][y] += int(val) if str(val).isdigit() else 0
-            else:
-                row_copy = dict(r)
-                row_copy["entity_type"] = raw_type
-                unmerged_rows.append(row_copy)
+                    cnt = int(val) if str(val).isdigit() else 0
+                    row_dict[y] = cnt
+                    tot += cnt
+                row_dict["total"] = tot
+                if tot > 0:
+                    final_output_rows.append(row_dict)
 
-        # Re-construct merged output rows
-        final_output_rows: List[Dict[str, Any]] = []
+            final_output_rows.sort(key=lambda r: (-int(r.get("total", 0)), str(r.get("canonical_name", ""))))
 
-        for (c_id, c_name, e_type), year_counts in cleaned_map.items():
-            row_dict = {
-                "canonical_id": c_id,
-                "canonical_name": c_name,
-                "entity_type": e_type,
-            }
-            tot = 0
-            for y in year_fields:
-                cnt = year_counts[y]
-                row_dict[y] = cnt
-                tot += cnt
-            row_dict["total"] = tot
-            if tot > 0:
-                final_output_rows.append(row_dict)
+            if len(final_output_rows) == len(rows) and final_output_rows == rows:
+                logger.info(f"Pass {pass_num}: LLM suggestions resulted in no effective row modifications. Recursive cleaning converged!")
+                if current_file != output_path or not output_path.exists():
+                    with open(output_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(final_output_rows)
+                clear_checkpoint()
+                return output_path
 
-        # Include unmerged valid rows
-        for r in unmerged_rows:
-            c_id = r.get("canonical_id", "")
-            c_name = r.get("canonical_name", "")
-            e_type = r.get("entity_type", "UNI")
-            row_dict = {
-                "canonical_id": c_id,
-                "canonical_name": c_name,
-                "entity_type": e_type,
-            }
-            tot = 0
-            for y in year_fields:
-                val = r.get(y, 0)
-                cnt = int(val) if str(val).isdigit() else 0
-                row_dict[y] = cnt
-                tot += cnt
-            row_dict["total"] = tot
-            if tot > 0:
-                final_output_rows.append(row_dict)
+            # Save intermediate cleaned CSV to output_path
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(final_output_rows)
 
-        # Sort descending by total, then by canonical_name
-        final_output_rows.sort(key=lambda r: (-int(r.get("total", 0)), str(r.get("canonical_name", ""))))
+            pruned_count = len(rows) - len(final_output_rows)
+            logger.info(f"Pass {pass_num} Complete for {input_path.name}: {len(rows)} rows -> {len(final_output_rows)} rows (pruned/combined {pruned_count}). Saved to {output_path}")
 
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(final_output_rows)
+            # Re-run taking newly written cleaned file as starting point for next pass iteration
+            current_file = output_path
+            checkpoint_data = {}
+            clear_checkpoint()
+            pass_num += 1
 
-        # Remove checkpoint file upon successful completion
-        if checkpoint_path.exists():
-            try:
-                checkpoint_path.unlink()
-            except Exception as unlink_err:
-                logger.warning(f"Could not remove checkpoint file {checkpoint_path}: {unlink_err}")
-
-        pruned_count = len(rows) - len(final_output_rows)
-        logger.info(f"CSV Cleaning Complete for {input_path.name}: {len(rows)} input rows -> {len(final_output_rows)} cleaned rows (pruned/combined {pruned_count} entries). Saved to {output_path}")
-
+        logger.info(f"Reached maximum recursive cleaning passes ({max_passes}) for {input_path.name}.")
         return output_path
 
     def clean_all(
@@ -486,8 +534,10 @@ class CSVCleaner:
         input_dir: Path = OUTPUT_DATA_DIR,
         output_dir: Optional[Path] = None,
         force: bool = False,
+        refine: bool = False,
         batch_config: Optional[Any] = None,
         config_path: Optional[Path] = None,
+        max_passes: int = 3,
     ) -> List[Path]:
         """Cleans all CSV matrix files in input_dir (obeying batch.yaml if present) and saves them to output_dir."""
         in_dir = Path(input_dir)
@@ -536,7 +586,7 @@ class CSVCleaner:
                     continue
 
             target_out = out_dir / csv_file.name
-            cleaned_path = self.clean_file(csv_file, output_csv_path=target_out, force=force)
+            cleaned_path = self.clean_file(csv_file, output_csv_path=target_out, force=force, refine=refine, max_passes=max_passes)
             cleaned_paths.append(cleaned_path)
 
         return cleaned_paths

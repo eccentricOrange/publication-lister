@@ -320,21 +320,21 @@ class BulkRunner:
         logger.info(f"Phase 3 Complete: Exported {len(exported_files)} CSV matrix files.")
         return exported_files
 
-    def run_bulk_clean(self, exported_files: Optional[List[Path]] = None, force: bool = False) -> List[Path]:
+    def run_bulk_clean(self, exported_files: Optional[List[Path]] = None, force: bool = False, refine: bool = False, max_passes: int = 3) -> List[Path]:
         """Phase 4: Cleans exported matrix CSVs with Gemini LLM into data/cleaned_output/."""
         logger.info("=== Phase 4: Bulk Matrix Cleaning ===")
         cleaner = CSVCleaner(registry=self.registry, gemini_client=self.gemini_client)
-        cleaned_files = cleaner.clean_all(input_dir=self.exporter.output_dir, force=force, batch_config=self.config)
+        cleaned_files = cleaner.clean_all(input_dir=self.exporter.output_dir, force=force, refine=refine, batch_config=self.config, max_passes=max_passes)
         logger.info(f"Phase 4 Complete: Cleaned {len(cleaned_files)} CSV matrix files into {cleaner.output_dir}.")
         return cleaned_files
 
-    def run_all(self, force: bool = False) -> List[Path]:
+    def run_all(self, force: bool = False, refine: bool = False, max_passes: int = 3) -> List[Path]:
         """Executes full 4-phase bulk pipeline: Extraction -> Global Normalization -> Export -> Cleaning."""
         logger.info(f"Starting Bulk Pipeline across {len(self.config.venues)} venues and years {min(self.config.years)}..{max(self.config.years)}")
         self.run_bulk_extraction(force=force)
         self.run_global_normalization(force=force)
         exported = self.run_bulk_export()
-        cleaned = self.run_bulk_clean(exported, force=force)
+        cleaned = self.run_bulk_clean(exported, force=force, refine=refine, max_passes=max_passes)
         logger.info("Bulk Pipeline execution finished successfully.")
         return cleaned
 

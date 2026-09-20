@@ -125,6 +125,8 @@ def run_clean(args: argparse.Namespace) -> None:
     start_year = getattr(args, "year_start", None)
     end_year = getattr(args, "year_end", None)
     force = getattr(args, "force", False)
+    refine = getattr(args, "refine", False)
+    max_passes = getattr(args, "max_passes", 3)
     config_val = getattr(args, "config", None)
     config_path = Path(config_val) if config_val else None
     model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
@@ -136,18 +138,18 @@ def run_clean(args: argparse.Namespace) -> None:
         in_p = Path(input_val)
         out_p = Path(output_val) if output_val else None
         if in_p.is_dir():
-            cleaner.clean_all(input_dir=in_p, output_dir=out_p, force=force, config_path=config_path)
+            cleaner.clean_all(input_dir=in_p, output_dir=out_p, force=force, refine=refine, config_path=config_path, max_passes=max_passes)
         else:
-            cleaner.clean_file(in_p, output_csv_path=out_p, force=force)
+            cleaner.clean_file(in_p, output_csv_path=out_p, force=force, refine=refine, max_passes=max_passes)
     elif clean_all_flag or (not venue and not start_year):
-        cleaner.clean_all(force=force, config_path=config_path)
+        cleaner.clean_all(force=force, refine=refine, config_path=config_path, max_passes=max_passes)
     elif venue and start_year and end_year:
         from src.utils import sanitize_venue_name
         clean_venue = sanitize_venue_name(venue)
         from src.config import OUTPUT_DATA_DIR
         target_input = OUTPUT_DATA_DIR / f"{clean_venue}_affiliations_{start_year}_{end_year}.csv"
         target_output = Path(output_val) if output_val else None
-        cleaner.clean_file(target_input, output_csv_path=target_output, force=force)
+        cleaner.clean_file(target_input, output_csv_path=target_output, force=force, refine=refine, max_passes=max_passes)
     else:
         logger.error("Must specify --input, --all, or venue with --year-start and --year-end for clean subcommand.")
         sys.exit(1)
@@ -176,12 +178,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
 def run_batch(args: argparse.Namespace) -> None:
     config_path = Path(args.config) if args.config else Path("batch.yaml")
     force = getattr(args, "force", False)
+    refine = getattr(args, "refine", False)
+    max_passes = getattr(args, "max_passes", 3)
     model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
     logger.info(f"Executing BATCH subcommand with YAML config: {config_path.resolve()}, model={model}")
     config = BatchConfig.from_file(config_path)
     runner = BulkRunner(config=config, model=model)
-    runner.run_all(force=force)
+    runner.run_all(force=force, refine=refine, max_passes=max_passes)
     if getattr(args, "build_visualisation", False):
         run_build_visualisation(args)
     logger.info("Batch pipeline execution completed successfully.")
@@ -231,7 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--year-start", type=int, default=None, help="Start publication year (optional)")
     p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
     p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
-    p_clean.add_argument("--force", action="store_true", help="Force re-cleaning ignoring existing cleaned files and checkpoints")
+    p_clean.add_argument("--force", action="store_true", help="Force re-cleaning from raw input files ignoring existing cleaned files")
+    p_clean.add_argument("--refine", "-r", action="store_true", help="Refine existing cleaned matrix CSV files as starting point for recursive cleaning")
+    p_clean.add_argument("--max-passes", type=int, default=3, help="Maximum recursive cleaning passes (defaults to 3)")
     p_clean.add_argument("--config", "-c", type=str, default=None, help="Path to batch.yaml configuration file (defaults to batch.yaml if present)")
     p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
@@ -244,12 +250,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--schedule-url", type=str, default=None, help="URL to online conference schedule")
     p_pipe.add_argument("--output", "-o", type=str, default=None, help="Output CSV path")
     p_pipe.add_argument("--force", action="store_true", help="Force re-run of all pipeline steps")
+    p_pipe.add_argument("--refine", "-r", action="store_true", help="Refine existing cleaned matrix CSV files during post-cleaning pass")
+    p_pipe.add_argument("--max-passes", type=int, default=3, help="Maximum recursive cleaning passes (defaults to 3)")
     p_pipe.add_argument("--build-visualisation", "--build-vis", action="store_true", help="Automatically generate visualization JSON manifest after pipeline completion")
 
     # 6. Batch subcommand
     p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
     p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
+    p_batch.add_argument("--refine", "-r", action="store_true", help="Refine existing cleaned matrix CSV files during bulk cleaning pass")
+    p_batch.add_argument("--max-passes", type=int, default=3, help="Maximum recursive cleaning passes (defaults to 3)")
     p_batch.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_batch.add_argument("--build-visualisation", "--build-vis", action="store_true", help="Automatically generate visualization JSON manifest after batch completion")
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
