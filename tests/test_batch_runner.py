@@ -103,6 +103,22 @@ source: openalex
         eccv_overrides = config.get_overrides("ECCV", 2024)
         self.assertEqual(eccv_overrides.get("search_term"), ["European Conference on Computer Vision", "ECCV"])
 
+    def test_cli_parser_model_arg(self):
+        parser = build_parser()
+        args = parser.parse_args(["--model", "gemini-3.1-pro", "batch", "-c", "batch.yaml"])
+        self.assertEqual(args.model, "gemini-3.1-pro")
+
+        args_sub = parser.parse_args(["batch", "--model", "gemini-3.1-pro"])
+        self.assertEqual(args_sub.model, "gemini-3.1-pro")
+
+    def test_bulk_runner_model_propagation(self):
+        example_yaml = Path("batch.example.yaml")
+        config = BatchConfig.from_file(example_yaml)
+        runner = BulkRunner(config=config, model="gemini-3.1-pro")
+        self.assertEqual(runner.model, "gemini-3.1-pro")
+        self.assertEqual(runner.gemini_client.model, "gemini-3.1-pro")
+        self.assertEqual(runner.normalizer.gemini_client.model, "gemini-3.1-pro")
+
 
 if __name__ == "__main__":
     unittest.main()

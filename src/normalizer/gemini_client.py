@@ -9,12 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import errors, types
 
-from src.config import GEMINI_API_KEY
+from src.config import DEFAULT_GEMINI_MODEL, GEMINI_API_KEY
 from src.normalizer.rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = DEFAULT_GEMINI_MODEL
 
 SYSTEM_PROMPT = """You are an expert institutional entity normalization assistant for academic papers.
 Your task is to map raw author affiliation strings to canonical organizations based on strict rules:
@@ -61,8 +61,14 @@ class GeminiClient:
     streamlined resolution outputs, native HttpOptions, and adaptive cool-off handling.
     """
 
-    def __init__(self, api_key: str = GEMINI_API_KEY, rate_limiter: Optional[TokenBucketRateLimiter] = None):
+    def __init__(
+        self,
+        api_key: str = GEMINI_API_KEY,
+        model: str = DEFAULT_GEMINI_MODEL,
+        rate_limiter: Optional[TokenBucketRateLimiter] = None,
+    ):
         self.api_key = api_key
+        self.model = model or DEFAULT_GEMINI_MODEL
         self.rate_limiter = rate_limiter or TokenBucketRateLimiter(requests_per_minute=6.0, tokens_per_minute=250000.0)
         self.initial_rate_queried = False
         self._client: Optional[genai.Client] = None
@@ -256,7 +262,7 @@ class GeminiClient:
 
             try:
                 response = self.client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=self.model,
                     contents=contents,
                     config=config,
                 )
@@ -425,7 +431,7 @@ class GeminiClient:
             self.rate_limiter.acquire()
             try:
                 response = self.client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=self.model,
                     contents=contents,
                     config=config,
                 )

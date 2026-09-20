@@ -88,13 +88,20 @@ class OpenAlexExtractor(BaseExtractor):
         api_key: str = OPENALEX_API_KEY,
         mailto: str = OPENALEX_MAILTO,
         sources_cache_path: Path = OPENALEX_SOURCES_CACHE_PATH,
+        model: Optional[str] = None,
+        gemini_client: Optional[GeminiClient] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.api_key = api_key
         self.mailto = mailto
         self.sources_cache_path = sources_cache_path
-        self.gemini_client = GeminiClient()
+        if gemini_client:
+            self.gemini_client = gemini_client
+            if model:
+                self.gemini_client.model = model
+        else:
+            self.gemini_client = GeminiClient(model=model or DEFAULT_GEMINI_MODEL)
         self.rate_limit_delay_seconds = 0.15
 
     def _load_sources_cache(self) -> Dict[str, Any]:

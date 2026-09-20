@@ -3,20 +3,20 @@ import logging
 import sys
 from pathlib import Path
 
-from src.logger import setup_logging
-from src.extractors.openalex import OpenAlexExtractor
-from src.extractors.ieee_xplore import IEEEExtractor
-from src.extractors.scopus import ScopusExtractor
+from src.config import DEFAULT_GEMINI_MODEL
 from src.extractors.conference_schedule import ConferenceScheduleExtractor
-from src.registry.organization_registry import OrganizationRegistry
+from src.extractors.ieee_xplore import IEEEExtractor
+from src.extractors.openalex import OpenAlexExtractor
+from src.extractors.scopus import ScopusExtractor
+from src.logger import setup_logging
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
-from src.exporters.matrix_exporter import MatrixExporter
-from src.cleaner.csv_cleaner import CSVCleaner
+from src.registry.organization_registry import OrganizationRegistry
 from src.runner.batch_config import BatchConfig
 from src.runner.bulk_runner import BulkRunner
+from src.cleaner.csv_cleaner import CSVCleaner
+from src.exporters.matrix_exporter import MatrixExporter
 
 logger = logging.getLogger("main")
-
 
 
 def run_extract(args: argparse.Namespace) -> None:
@@ -25,12 +25,13 @@ def run_extract(args: argparse.Namespace) -> None:
     end_year = args.year_end
     source = args.source.lower()
     force = args.force
+    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
-    logger.info(f"Executing EXTRACT subcommand for venue={venue}, years={start_year}..{end_year}, source={source}")
+    logger.info(f"Executing EXTRACT subcommand for venue={venue}, years={start_year}..{end_year}, source={source}, model={model}")
 
     for year in range(start_year, end_year + 1):
         if source == "openalex":
-            extractor = OpenAlexExtractor()
+            extractor = OpenAlexExtractor(model=model)
             extractor.extract(venue, year, force=force)
         elif source == "ieee":
             extractor = IEEEExtractor()
@@ -48,7 +49,7 @@ def run_extract(args: argparse.Namespace) -> None:
             extracted = False
             # 1. Try OpenAlex first (free, open, high rate limit)
             try:
-                extractor = OpenAlexExtractor()
+                extractor = OpenAlexExtractor(model=model)
                 extractor.extract(venue, year, force=force)
                 extracted = True
             except Exception as e:
@@ -90,11 +91,12 @@ def run_normalize(args: argparse.Namespace) -> None:
     start_year = args.year_start
     end_year = args.year_end
     force = args.force
+    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
-    logger.info(f"Executing NORMALIZE subcommand for venue={venue}, years={start_year}..{end_year}")
+    logger.info(f"Executing NORMALIZE subcommand for venue={venue}, years={start_year}..{end_year}, model={model}")
 
     registry = OrganizationRegistry()
-    normalizer = AffiliationNormalizer(registry=registry)
+    normalizer = AffiliationNormalizer(registry=registry, model=model)
 
     for year in range(start_year, end_year + 1):
         normalizer.normalize_venue_year(venue, year, force=force)
@@ -122,8 +124,10 @@ def run_clean(args: argparse.Namespace) -> None:
     venue = getattr(args, "venue", None)
     start_year = getattr(args, "year_start", None)
     end_year = getattr(args, "year_end", None)
+    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
-    cleaner = CSVCleaner()
+    logger.info(f"Executing CLEAN subcommand with model={model}")
+    cleaner = CSVCleaner(model=model)
 
     if input_val:
         in_p = Path(input_val)
@@ -158,10 +162,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
 def run_batch(args: argparse.Namespace) -> None:
     config_path = Path(args.config) if args.config else Path("batch.yaml")
     force = getattr(args, "force", False)
+    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
-    logger.info(f"Executing BATCH subcommand with YAML config: {config_path.resolve()}")
+    logger.info(f"Executing BATCH subcommand with YAML config: {config_path.resolve()}, model={model}")
     config = BatchConfig.from_file(config_path)
-    runner = BulkRunner(config=config)
+    runner = BulkRunner(config=config, model=model)
     runner.run_all(force=force)
     logger.info("Batch pipeline execution completed successfully.")
 
@@ -172,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Academic Conference & Journal Affiliation Tracker",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
+    parser.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Subcommands")
 
@@ -180,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--venue", "-v_name", type=str, required=True, help="Venue name (e.g., ICRA, IROS, CVPR)")
         subparser.add_argument("--year-start", type=int, required=True, help="Start publication year (e.g., 2017)")
         subparser.add_argument("--year-end", type=int, required=True, help="End publication year (e.g., 2026)")
+        subparser.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
         subparser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 1. Extract subcommand
@@ -208,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--year-start", type=int, default=None, help="Start publication year (optional)")
     p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
     p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
+    p_clean.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 5. Pipeline subcommand
@@ -223,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
     p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
+    p_batch.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser

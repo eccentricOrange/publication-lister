@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from src.config import NORMALIZED_DATA_DIR, RAW_DATA_DIR
+from src.config import DEFAULT_GEMINI_MODEL, NORMALIZED_DATA_DIR, RAW_DATA_DIR
 from src.normalizer.gemini_client import GeminiClient
 from src.registry.organization_registry import OrganizationRegistry
 from src.utils import sanitize_venue_name
@@ -23,11 +23,17 @@ class AffiliationNormalizer:
         self,
         registry: Optional[OrganizationRegistry] = None,
         gemini_client: Optional[GeminiClient] = None,
+        model: Optional[str] = None,
         raw_dir: Path = RAW_DATA_DIR,
         normalized_dir: Path = NORMALIZED_DATA_DIR,
     ):
         self.registry = registry or OrganizationRegistry()
-        self.gemini_client = gemini_client or GeminiClient()
+        if gemini_client:
+            self.gemini_client = gemini_client
+            if model:
+                self.gemini_client.model = model
+        else:
+            self.gemini_client = GeminiClient(model=model or DEFAULT_GEMINI_MODEL)
         self.raw_dir = raw_dir
         self.normalized_dir = normalized_dir
 

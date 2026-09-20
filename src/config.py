@@ -10,6 +10,7 @@ load_dotenv(dotenv_path=BASE_DIR / ".env")
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
 OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 IEEE_API_KEY = os.getenv("IEEE_API_KEY", "")
 SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY", "")
 

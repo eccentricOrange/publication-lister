@@ -35,6 +35,7 @@ class BatchConfig:
     venue_configs: List[VenueConfig]
     years: List[int]
     default_source: str = "openalex"
+    model: Optional[str] = None
     exceptions: List[VenueException] = field(default_factory=list)
 
     @property
@@ -51,6 +52,11 @@ class BatchConfig:
         logger.info(f"Loading batch configuration from: {yaml_path.resolve()}")
         with open(yaml_path, "r", encoding="utf-8") as f:
             raw_data = yaml.safe_load(f) or {}
+
+        # Parse model
+        model = raw_data.get("model")
+        if model:
+            model = str(model).strip()
 
         # 1. Parse venues
         raw_venues = raw_data.get("venues", [])
@@ -146,6 +152,7 @@ class BatchConfig:
             venue_configs=venue_configs,
             years=years,
             default_source=default_source,
+            model=model,
             exceptions=exceptions,
         )
 

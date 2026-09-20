@@ -3,9 +3,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from src.config import NORMALIZED_DATA_DIR, RAW_DATA_DIR
-from src.runner.batch_config import BatchConfig
 from src.cleaner.csv_cleaner import CSVCleaner
+from src.config import DEFAULT_GEMINI_MODEL, NORMALIZED_DATA_DIR, RAW_DATA_DIR
 from src.exporters.matrix_exporter import MatrixExporter
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.openalex import OpenAlexExtractor
@@ -13,32 +12,40 @@ from src.extractors.scopus import ScopusExtractor
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
 from src.normalizer.gemini_client import GeminiClient
 from src.registry.organization_registry import OrganizationRegistry
+from src.runner.batch_config import BatchConfig
 
 logger = logging.getLogger(__name__)
 
 
 class BulkRunner:
     """
-    Orchestrates multi-venue, multi-year bulk extraction, global pooled normalization, export, and cleaning.
-    - Phase 1: Fetches raw datasets from OpenAlex/IEEE across all venues/years (with pause/resume).
-    - Phase 2: Pools raw affiliation strings across all venues into a single resolution phase,
+    Orchestrates high-performance multi-venue, multi-year pipeline:
+    - Phase 1: Bulk dataset extraction across all configured venues & years.
+    - Phase 2: Pooled global affiliation string normalization across ALL venues/years at once,
                maximizing cross-venue institution string overlap and minimizing Gemini LLM calls.
     - Phase 3: Aggregates and exports matrix CSVs to data/output/.
     - Phase 4: Cleans exported matrix CSVs with Gemini LLM into data/cleaned_output/.
     """
-
 
     def __init__(
         self,
         config: BatchConfig,
         registry: Optional[OrganizationRegistry] = None,
         gemini_client: Optional[GeminiClient] = None,
+        model: Optional[str] = None,
         raw_dir: Path = RAW_DATA_DIR,
         normalized_dir: Path = NORMALIZED_DATA_DIR,
     ):
         self.config = config
         self.registry = registry or OrganizationRegistry()
-        self.gemini_client = gemini_client or GeminiClient()
+        eff_model = model or config.model or DEFAULT_GEMINI_MODEL
+        if gemini_client:
+            self.gemini_client = gemini_client
+            if eff_model:
+                self.gemini_client.model = eff_model
+        else:
+            self.gemini_client = GeminiClient(model=eff_model)
+        self.model = self.gemini_client.model
         self.normalizer = AffiliationNormalizer(
             registry=self.registry,
             gemini_client=self.gemini_client,
@@ -61,7 +68,7 @@ class BulkRunner:
             for year in self.config.years:
                 if not self.config.is_year_active(venue, year):
                     logger.info(f"Skipping {venue} {year}: inactive year specified in batch configuration exceptions.")
-                    extractor = OpenAlexExtractor()
+                    extractor = OpenAlexExtractor(gemini_client=self.gemini_client)
                     extractor.append_raw_batch(venue, year, [], completed=True, next_cursor=None)
                     processed_pairs.append((venue, year))
                     continue
@@ -71,7 +78,7 @@ class BulkRunner:
                 logger.info(f"Extracting raw data for {venue} {year} (source={source})...")
 
                 if source == "openalex":
-                    extractor = OpenAlexExtractor()
+                    extractor = OpenAlexExtractor(gemini_client=self.gemini_client)
                     extractor.extract(
                         venue,
                         year,
@@ -117,7 +124,7 @@ class BulkRunner:
                 raw_file = self.raw_dir / venue / f"{venue}_{year}.json"
                 if not raw_file.exists():
                     if not self.config.is_year_active(venue, year):
-                        extractor = OpenAlexExtractor()
+                        extractor = OpenAlexExtractor(gemini_client=self.gemini_client)
                         rdata = extractor.append_raw_batch(venue, year, [], completed=True, next_cursor=None)
                     else:
                         err_msg = f"Raw dataset file missing for {venue} {year} at {raw_file}. Run Phase 1 first."
