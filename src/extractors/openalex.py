@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from src.config import (
+    DEFAULT_GEMINI_MODEL,
     OPENALEX_API_KEY,
     OPENALEX_MAILTO,
     OPENALEX_SOURCES_CACHE_PATH,

@@ -186,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--venue", "-v_name", type=str, required=True, help="Venue name (e.g., ICRA, IROS, CVPR)")
         subparser.add_argument("--year-start", type=int, required=True, help="Start publication year (e.g., 2017)")
         subparser.add_argument("--year-end", type=int, required=True, help="End publication year (e.g., 2026)")
-        subparser.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+        subparser.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
         subparser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 1. Extract subcommand
@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--year-start", type=int, default=None, help="Start publication year (optional)")
     p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
     p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
-    p_clean.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 5. Pipeline subcommand
@@ -231,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch = subparsers.add_parser("batch", help="Run multi-venue bulk pipeline using YAML configuration")
     p_batch.add_argument("--config", "-c", type=str, default="batch.yaml", help="Path to batch.yaml configuration file (defaults to batch.yaml in root)")
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
-    p_batch.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_batch.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser
