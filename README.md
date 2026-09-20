@@ -301,7 +301,6 @@ python3 main.py pipeline --venue ICRA --year-start 2017 --year-end 2026 --source
 | [src/exporters/matrix_exporter.py](src/exporters/matrix_exporter.py) | No | Generates matrix CSV files with paper deduplication and institution sorting. |
 | [src/cleaner/csv_cleaner.py](src/cleaner/csv_cleaner.py) | No | Post-cleaning module utilizing Gemini LLM + Python aggregation to prune department rows and merge sub-entities into `data/cleaned_output/`. |
 | `data/canonical_organizations.json` | Persistent Data | Central persistent database of canonical institutional entities, types, and aliases. |
-| `data/openalex_sources_cache.json` | Persistent Cache | Resolved mapping of venue acronyms to OpenAlex Source IDs. |
 | `data/openalex_sources_cache.json` | Persistent Cache | Resolved mapping of venue acronyms to OpenAlex Source IDs, DOI prefixes, and publication frequency. |
 
 ---
@@ -315,10 +314,8 @@ python3 -m unittest discover -s tests
 ```
 
 The test suite covers:
-- YAML batch config parsing and exception merging (`test_batch_runner.py`).
 - YAML batch config parsing, model propagation, and exception merging (`test_batch_runner.py`).
 - OpenAlex source resolution and filter fallback protection (`test_extractors.py`).
 - Registry search, canonical ID generation, and alias matching (`test_registry.py`).
 - Token-bucket rate limiting and logger formatting (`test_logger_and_rate_limiter.py`).
-- Matrix CSV exporting and paper deduplication (`test_normalizer_and_exporter.py`).
 - Matrix CSV exporting, paper deduplication, and CSV post-cleaning (`test_normalizer_and_exporter.py`, `test_csv_cleaner.py`).
