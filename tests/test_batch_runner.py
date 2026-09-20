@@ -120,5 +120,42 @@ source: openalex
         self.assertEqual(runner.normalizer.gemini_client.model, "gemini-3.1-pro")
 
 
+    def test_build_site_data_obeys_batch_yaml(self):
+        from scripts.build_site_data import build_site_data
+        
+        cleaned_dir = self.root_path / "cleaned_output"
+        cleaned_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create CSV files for ICRA and IROS
+        icra_csv = cleaned_dir / "ICRA_affiliations_2023_2024.csv"
+        iros_csv = cleaned_dir / "IROS_affiliations_2023_2024.csv"
+        
+        headers = ["canonical_id", "canonical_name", "entity_type", "2023", "2024", "total"]
+        row = {"canonical_id": "UNI-00001-STANFD", "canonical_name": "Stanford", "entity_type": "UNI", "2023": "1", "2024": "2", "total": "3"}
+        
+        import csv
+        for p in [icra_csv, iros_csv]:
+            with open(p, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=headers)
+                w.writeheader()
+                w.writerow(row)
+
+        # Create custom YAML that includes ONLY ICRA (IROS excluded)
+        custom_yaml = self.root_path / "batch.yaml"
+        custom_yaml.write_text("venues:\n  - ICRA\nyears: [2023, 2024]\n")
+        
+        target_json = self.root_path / "site_data.json"
+        
+        manifest = build_site_data(
+            cleaned_dir=cleaned_dir,
+            output_dir=self.root_path,
+            target_json_path=target_json,
+            config_path=custom_yaml,
+        )
+        
+        self.assertIn("ICRA", manifest["venues"])
+        self.assertNotIn("IROS", manifest["venues"])
+
+
 if __name__ == "__main__":
     unittest.main()

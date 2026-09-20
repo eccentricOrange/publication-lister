@@ -124,6 +124,7 @@ def run_clean(args: argparse.Namespace) -> None:
     venue = getattr(args, "venue", None)
     start_year = getattr(args, "year_start", None)
     end_year = getattr(args, "year_end", None)
+    force = getattr(args, "force", False)
     model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
     logger.info(f"Executing CLEAN subcommand with model={model}")
@@ -133,18 +134,18 @@ def run_clean(args: argparse.Namespace) -> None:
         in_p = Path(input_val)
         out_p = Path(output_val) if output_val else None
         if in_p.is_dir():
-            cleaner.clean_all(input_dir=in_p, output_dir=out_p)
+            cleaner.clean_all(input_dir=in_p, output_dir=out_p, force=force)
         else:
-            cleaner.clean_file(in_p, output_csv_path=out_p)
+            cleaner.clean_file(in_p, output_csv_path=out_p, force=force)
     elif clean_all_flag or (not venue and not start_year):
-        cleaner.clean_all()
+        cleaner.clean_all(force=force)
     elif venue and start_year and end_year:
         from src.utils import sanitize_venue_name
         clean_venue = sanitize_venue_name(venue)
         from src.config import OUTPUT_DATA_DIR
         target_input = OUTPUT_DATA_DIR / f"{clean_venue}_affiliations_{start_year}_{end_year}.csv"
         target_output = Path(output_val) if output_val else None
-        cleaner.clean_file(target_input, output_csv_path=target_output)
+        cleaner.clean_file(target_input, output_csv_path=target_output, force=force)
     else:
         logger.error("Must specify --input, --all, or venue with --year-start and --year-end for clean subcommand.")
         sys.exit(1)
@@ -153,7 +154,9 @@ def run_clean(args: argparse.Namespace) -> None:
 def run_build_visualisation(args: argparse.Namespace) -> None:
     from scripts.build_site_data import build_site_data
     logger.info("Executing BUILD-VISUALISATION subcommand...")
-    build_site_data()
+    config_val = getattr(args, "config", None)
+    config_path = Path(config_val) if config_val else None
+    build_site_data(config_path=config_path)
     logger.info("Visualisation dataset manifest built successfully.")
 
 
@@ -226,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--year-start", type=int, default=None, help="Start publication year (optional)")
     p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
     p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
+    p_clean.add_argument("--force", action="store_true", help="Force re-cleaning ignoring existing cleaned files and checkpoints")
     p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
@@ -249,6 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 7. Build Visualisation subcommand
     p_vis = subparsers.add_parser("build-visualisation", aliases=["visualize", "build-vis"], help="Build web visualization dataset manifest in docs/data/")
+    p_vis.add_argument("--config", "-c", type=str, default=None, help="Path to batch.yaml configuration file (defaults to batch.yaml if present)")
     p_vis.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser

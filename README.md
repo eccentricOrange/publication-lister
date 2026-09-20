@@ -26,7 +26,7 @@ A modular, extensible Python toolkit and CLI application to extract, deduplicate
    - **Phase 1 (Bulk Extraction)**: Ingests raw data across all configured venues/years with cursor checkpointing and pause/resume support.
    - **Phase 2 (Global Pooled Normalization)**: Pools all raw affiliation strings across **all** datasets into a single resolution pass against the local registry and Gemini LLM. This maximizes string overlap and minimizes LLM API consumption.
    - **Phase 3 (Matrix Export)**: Exports CSV matrix reports sorted descending by total publication volume.
-   - **Phase 4 (Matrix Post-Cleaning)**: Cleans exported CSV matrices with Gemini LLM + Python aggregation into `data/cleaned_output/`.
+   - **Phase 4 (Matrix Post-Cleaning)**: Cleans exported CSV matrices with Gemini LLM + Python aggregation into `data/cleaned_output/` with chunk-level checkpointing (`.checkpoint_<filename>.json`) for seamless pause/resume upon interruptions and `--force` override.
 
 ---
 
@@ -246,6 +246,9 @@ python3 main.py clean --input data/output/ICRA_affiliations_2017_2026.csv
 
 # Clean using a specific Gemini LLM model
 python3 main.py clean --all --model gemini-3.1-pro
+
+# Force re-cleaning ignoring existing cleaned files and checkpoints
+python3 main.py clean --all --force
 ```
 
 ### 3. Web Visualisation Data Building
@@ -253,8 +256,11 @@ python3 main.py clean --all --model gemini-3.1-pro
 Build the single-source-of-truth data manifest for the GitHub Pages web visualization:
 
 ```bash
-# Build data manifest (visualisation/data/site_data.json) from cleaned CSVs
+# Build data manifest (docs/data/site_data.json) from cleaned CSVs (obeys batch.yaml if present)
 python3 main.py build-visualisation
+
+# Specify a custom batch configuration file
+python3 main.py build-visualisation --config path/to/my_batch.yaml
 
 # Aliases also supported
 python3 main.py visualize

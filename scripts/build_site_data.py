@@ -6,7 +6,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Ensure root directory is on sys.path
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,6 +19,8 @@ from src.config import (
     OPENALEX_SOURCES_CACHE_PATH,
     OUTPUT_DATA_DIR,
 )
+from src.runner.batch_config import BatchConfig
+from src.utils import sanitize_venue_name
 
 logger = logging.getLogger("build_site_data")
 
@@ -37,12 +39,37 @@ def build_site_data(
     registry_path: Path = CANONICAL_REGISTRY_PATH,
     sources_cache_path: Path = OPENALEX_SOURCES_CACHE_PATH,
     target_json_path: Path = Path("docs/data/site_data.json"),
+    config_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Scans matrix CSV files, merges split files per venue, cross-references canonical metadata and OpenAlex sources cache,
     and produces a consolidated JSON manifest for the visualisation web app.
+    Obeys batch.yaml configuration if present or specified via config_path.
     """
     logger.info("Building site data manifest for web visualization...")
+
+    # 0. Load BatchConfig if config_path is specified or default batch.yaml exists
+    batch_config: Optional[BatchConfig] = None
+    target_config = config_path if config_path else Path("batch.yaml")
+    if target_config.exists():
+        try:
+            batch_config = BatchConfig.from_file(target_config)
+            logger.info(f"Obeying batch configuration from {target_config.resolve()} ({len(batch_config.venues)} active venues)")
+        except Exception as e:
+            logger.warning(f"Could not load batch configuration from {target_config}: {e}")
+    elif config_path:
+        logger.warning(f"Specified batch configuration file not found at {config_path.resolve()}")
+
+    allowed_venues: Optional[Set[str]] = None
+    if batch_config:
+        allowed_venues = set()
+        for v_cfg in batch_config.venue_configs:
+            allowed_venues.add(v_cfg.short_name.upper())
+            if isinstance(v_cfg.search_term, str):
+                allowed_venues.add(sanitize_venue_name(v_cfg.search_term).upper())
+            elif isinstance(v_cfg.search_term, list):
+                for st in v_cfg.search_term:
+                    allowed_venues.add(sanitize_venue_name(st).upper())
 
     # 1. Locate CSV files (prefer cleaned_output, fallback to output)
     csv_files: List[Path] = []
@@ -59,6 +86,9 @@ def build_site_data(
     for csv_file in csv_files:
         venue, start_yr, end_yr = parse_filename(csv_file.name)
         if venue:
+            if allowed_venues is not None and venue.upper() not in allowed_venues and sanitize_venue_name(venue).upper() not in allowed_venues:
+                logger.info(f"Excluding venue '{venue}' from site data manifest (not active in {target_config.name}).")
+                continue
             venue_file_map.setdefault(venue, []).append(csv_file)
 
     # 2. Load Canonical Registry metadata
@@ -128,7 +158,13 @@ def build_site_data(
                 f_rows = list(reader)
                 for f_name in f_fields:
                     if f_name not in meta_headers and f_name.isdigit():
-                        all_years_set.add(int(f_name))
+                        y_int = int(f_name)
+                        if batch_config:
+                            if not batch_config.is_year_active(venue, y_int):
+                                continue
+                            if batch_config.years and y_int not in batch_config.years:
+                                continue
+                        all_years_set.add(y_int)
                 file_rows_list.append((f_fields, f_rows))
 
         sorted_years = [str(y) for y in sorted(list(all_years_set))]

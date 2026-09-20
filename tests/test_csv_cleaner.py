@@ -171,6 +171,47 @@ class TestCSVCleaner(unittest.TestCase):
             reg_content_after = json.load(f)
         self.assertEqual(reg_content_after, self.seed_data)
 
+    def test_csv_cleaner_checkpoint_resume_and_skip(self):
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        input_csv = self.out_dir / "TEST_affiliations_2023_2024.csv"
+        headers = ["canonical_id", "canonical_name", "entity_type", "2023", "total"]
+        rows = [
+            {"canonical_id": "UNI-00001-STANFD", "canonical_name": "Stanford University", "entity_type": "UNI", "2023": "8", "total": "8"},
+        ]
+        with open(input_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        output_csv = self.cleaned_dir / "TEST_affiliations_2023_2024.csv"
+        self.cleaned_dir.mkdir(parents=True, exist_ok=True)
+        output_csv.write_text("dummy output")
+
+        mock_gemini = MagicMock()
+        cleaner = CSVCleaner(registry=self.registry, gemini_client=mock_gemini, output_dir=self.cleaned_dir)
+
+        # 1. Without force, it should skip when target output already exists
+        res = cleaner.clean_file(input_csv, force=False)
+        self.assertEqual(res, output_csv)
+        self.assertEqual(output_csv.read_text(), "dummy output")
+        mock_gemini.client.models.generate_content.assert_not_called()
+
+        # 2. With force=True, it re-runs and cleans checkpoint file upon completion
+        ckpt_file = self.cleaned_dir / f".checkpoint_{input_csv.name}.json"
+        ckpt_data = {
+            "pass1_problematic_names": [],
+            "pass2_prune_ids": [],
+            "pass2_merges": [],
+            "pass2_type_fixes": {},
+            "pass1_completed_chunks": [0],
+            "pass2_completed_chunks": [0],
+        }
+        ckpt_file.write_text(json.dumps(ckpt_data))
+
+        res_forced = cleaner.clean_file(input_csv, force=True)
+        self.assertEqual(res_forced, output_csv)
+        self.assertFalse(ckpt_file.exists())  # Checkpoint file deleted after successful run
+
 
 if __name__ == "__main__":
     unittest.main()

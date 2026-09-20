@@ -67,6 +67,7 @@ class CSVCleaner:
     - Pass 1 (Triage): Send plain list of institution names (no codes, no JSON) to Gemini to identify problematic entries (duplicates, prunes, mix-ups).
     - Pass 2 (Deep Analysis): Send rich context for identified problematic entries (canonical IDs, names, entity types, and known aliases) to Gemini along with institutional hierarchy rules to get recommended actions (prunes, merges, entity_type fixes).
     - Pass 3 (Python Execution): Deterministically merge/prune rows, fix categorization, and aggregate paper counts in Python.
+    - Features full Pause/Resume checkpointing (.checkpoint_<filename>.json) and file-level skip/caching support.
     - Saves cleaned CSV files to data/cleaned_output/ (never overwrites data/output/).
     - Leaves canonical organization registry COMPLETELY UNTOUCHED.
     """
@@ -187,9 +188,10 @@ class CSVCleaner:
         self,
         input_csv_path: Path,
         output_csv_path: Optional[Path] = None,
+        force: bool = False,
     ) -> Path:
         """
-        Cleans a matrix CSV file using a 2-pass workflow:
+        Cleans a matrix CSV file using a 2-pass workflow with full Pause/Resume checkpointing & skip caching:
         1. Pass 1: Send plain institution names to Gemini to triage problematic entries.
         2. Pass 2: Enrich problematic entries with aliases & entity types; query Gemini with hierarchy rules.
         3. Pass 3: Deterministically aggregate paper counts, prune rows, and fix entity types in Python.
@@ -205,6 +207,30 @@ class CSVCleaner:
 
         output_path = Path(output_csv_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # File-Level Skip Caching
+        if output_path.exists() and not force:
+            logger.info(f"Cleaned matrix CSV already exists at {output_path.resolve()}. Skipping LLM cleaning pass (use --force to re-clean).")
+            return output_path
+
+        # Chunk-Level Checkpointing Setup
+        checkpoint_path = output_path.parent / f".checkpoint_{input_path.name}.json"
+        checkpoint_data: Dict[str, Any] = {}
+        if checkpoint_path.exists():
+            try:
+                with open(checkpoint_path, "r", encoding="utf-8") as cp_file:
+                    checkpoint_data = json.load(cp_file)
+                logger.info(f"Resuming CSV cleaning from checkpoint at {checkpoint_path.resolve()}")
+            except Exception as e:
+                logger.warning(f"Could not read existing checkpoint at {checkpoint_path}: {e}")
+                checkpoint_data = {}
+
+        def save_checkpoint(cp_data: Dict[str, Any]) -> None:
+            try:
+                with open(checkpoint_path, "w", encoding="utf-8") as cp_file:
+                    json.dump(cp_data, cp_file, ensure_ascii=False)
+            except Exception as cp_err:
+                logger.warning(f"Could not save checkpoint to {checkpoint_path}: {cp_err}")
 
         logger.info(f"Starting CSV cleaning for {input_path.resolve()} -> {output_path.resolve()}")
 
@@ -244,15 +270,26 @@ class CSVCleaner:
         name_chunk_size = 150
         name_chunks = [raw_names[i : i + name_chunk_size] for i in range(0, len(raw_names), name_chunk_size)]
 
-        all_problematic_names: Set[str] = set()
-        logger.info(f"Pass 1: Querying Gemini LLM with {len(raw_names)} plain names across {len(name_chunks)} chunk(s) for triage...")
+        all_problematic_names: Set[str] = set(checkpoint_data.get("all_problematic_names", []))
+        pass1_val = checkpoint_data.get("pass1_completed_chunks", 0)
+        pass1_start_chunk = len(pass1_val) if isinstance(pass1_val, list) else int(pass1_val)
 
-        for idx, chunk in enumerate(name_chunks, 1):
-            logger.info(f"Pass 1 (Chunk {idx}/{len(name_chunks)}): Triaging {len(chunk)} plain institution names...")
-            prob = self._query_pass1_chunk(chunk, config)
-            for p in prob:
-                if str(p).strip():
-                    all_problematic_names.add(str(p).strip().lower())
+        if pass1_start_chunk < len(name_chunks):
+            logger.info(f"Pass 1: Querying Gemini LLM with {len(raw_names)} plain names across {len(name_chunks)} chunk(s) (resuming from chunk {pass1_start_chunk + 1})...")
+
+            for idx in range(pass1_start_chunk, len(name_chunks)):
+                chunk = name_chunks[idx]
+                logger.info(f"Pass 1 (Chunk {idx + 1}/{len(name_chunks)}): Triaging {len(chunk)} plain institution names...")
+                prob = self._query_pass1_chunk(chunk, config)
+                for p in prob:
+                    if str(p).strip():
+                        all_problematic_names.add(str(p).strip().lower())
+
+                checkpoint_data["pass1_completed_chunks"] = idx + 1
+                checkpoint_data["all_problematic_names"] = sorted(list(all_problematic_names))
+                save_checkpoint(checkpoint_data)
+        else:
+            logger.info(f"Pass 1: Loaded {len(all_problematic_names)} triaged problematic names from checkpoint.")
 
         logger.info(f"Pass 1 Complete: Identified {len(all_problematic_names)} potential problematic name entries.")
 
@@ -267,7 +304,6 @@ class CSVCleaner:
 
             if c_name.lower() in all_problematic_names or c_id.lower() in all_problematic_names:
                 problematic_rows.append(r)
-                # Lookup known aliases from OrganizationRegistry
                 aliases = []
                 if c_id:
                     reg_entry = self.registry._lookup_map.get(c_id.upper()) or self.registry.find_by_string(c_id)
@@ -285,18 +321,31 @@ class CSVCleaner:
         entry_chunk_size = 80
         entry_chunks = [problematic_entries_payload[i : i + entry_chunk_size] for i in range(0, len(problematic_entries_payload), entry_chunk_size)]
 
-        all_prune_ids: List[str] = []
-        all_merges: List[Dict[str, Any]] = []
-        all_type_fixes: Dict[str, str] = {}
+        all_prune_ids: List[str] = checkpoint_data.get("all_prune_ids", [])
+        all_merges: List[Dict[str, Any]] = checkpoint_data.get("all_merges", [])
+        all_type_fixes: Dict[str, str] = checkpoint_data.get("all_type_fixes", {})
 
-        logger.info(f"Pass 2: Performing deep analysis on {len(problematic_entries_payload)} problematic entries with aliases & rules...")
+        pass2_val = checkpoint_data.get("pass2_completed_chunks", 0)
+        pass2_start_chunk = len(pass2_val) if isinstance(pass2_val, list) else int(pass2_val)
 
-        for idx, chunk in enumerate(entry_chunks, 1):
-            logger.info(f"Pass 2 (Chunk {idx}/{len(entry_chunks)}): Deep analyzing {len(chunk)} entries...")
-            p_ids, m_groups, t_fixes = self._query_pass2_deep_analysis(chunk, config)
-            all_prune_ids.extend(p_ids)
-            all_merges.extend(m_groups)
-            all_type_fixes.update(t_fixes)
+        if pass2_start_chunk < len(entry_chunks):
+            logger.info(f"Pass 2: Performing deep analysis on {len(problematic_entries_payload)} problematic entries (resuming from chunk {pass2_start_chunk + 1})...")
+
+            for idx in range(pass2_start_chunk, len(entry_chunks)):
+                chunk = entry_chunks[idx]
+                logger.info(f"Pass 2 (Chunk {idx + 1}/{len(entry_chunks)}): Deep analyzing {len(chunk)} entries...")
+                p_ids, m_groups, t_fixes = self._query_pass2_deep_analysis(chunk, config)
+                all_prune_ids.extend(p_ids)
+                all_merges.extend(m_groups)
+                all_type_fixes.update(t_fixes)
+
+                checkpoint_data["pass2_completed_chunks"] = idx + 1
+                checkpoint_data["all_prune_ids"] = all_prune_ids
+                checkpoint_data["all_merges"] = all_merges
+                checkpoint_data["all_type_fixes"] = all_type_fixes
+                save_checkpoint(checkpoint_data)
+        else:
+            logger.info(f"Pass 2: Loaded deep analysis results ({len(all_prune_ids)} prunes, {len(all_merges)} merges, {len(all_type_fixes)} type fixes) from checkpoint.")
 
         prune_set: Set[str] = {str(pid).strip().lower() for pid in all_prune_ids if pid}
 
@@ -333,7 +382,6 @@ class CSVCleaner:
         cleaned_map: Dict[Tuple[str, str, str], Dict[str, int]] = {}
         unmerged_rows: List[Dict[str, Any]] = []
 
-        # Prepare normalized type fixes map (lowercased key -> new_type)
         type_fixes_map: Dict[str, str] = {str(k).strip().lower(): str(v).strip().upper() for k, v in all_type_fixes.items()}
 
         for r in rows:
@@ -357,12 +405,11 @@ class CSVCleaner:
 
             if target_key:
                 c_id, c_name, c_type = target_key
-                # Override type if fix requested for parent key
                 if c_id.lower() in type_fixes_map:
                     c_type = type_fixes_map[c_id.lower()]
                 elif c_name.lower() in type_fixes_map:
                     c_type = type_fixes_map[c_name.lower()]
-                
+
                 final_key = (c_id, c_name, c_type)
 
                 if final_key not in cleaned_map:
@@ -422,6 +469,13 @@ class CSVCleaner:
             writer.writeheader()
             writer.writerows(final_output_rows)
 
+        # Remove checkpoint file upon successful completion
+        if checkpoint_path.exists():
+            try:
+                checkpoint_path.unlink()
+            except Exception as unlink_err:
+                logger.warning(f"Could not remove checkpoint file {checkpoint_path}: {unlink_err}")
+
         pruned_count = len(rows) - len(final_output_rows)
         logger.info(f"CSV Cleaning Complete for {input_path.name}: {len(rows)} input rows -> {len(final_output_rows)} cleaned rows (pruned/combined {pruned_count} entries). Saved to {output_path}")
 
@@ -431,6 +485,7 @@ class CSVCleaner:
         self,
         input_dir: Path = OUTPUT_DATA_DIR,
         output_dir: Optional[Path] = None,
+        force: bool = False,
     ) -> List[Path]:
         """Cleans all CSV matrix files in input_dir and saves them to output_dir."""
         in_dir = Path(input_dir)
@@ -445,7 +500,7 @@ class CSVCleaner:
 
         for csv_file in csv_files:
             target_out = out_dir / csv_file.name
-            cleaned_path = self.clean_file(csv_file, output_csv_path=target_out)
+            cleaned_path = self.clean_file(csv_file, output_csv_path=target_out, force=force)
             cleaned_paths.append(cleaned_path)
 
         return cleaned_paths
