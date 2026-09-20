@@ -54,6 +54,54 @@ Return ONLY a valid JSON object mapping raw strings to resolutions:
 """
 
 
+def parse_gemini_json(text_content: str) -> Any:
+    """
+    Parses JSON output from Gemini LLM responses, applying multi-tier cleanup
+    for markdown code fences, leading/trailing prose, trailing commas, and unescaped control characters.
+    """
+    if not text_content or not text_content.strip():
+        raise ValueError("Empty response text from Gemini LLM")
+
+    cleaned = text_content.strip()
+
+    # 1. Strip markdown code fences (```json ... ``` or ``` ...)
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    # 2. Try standard json.loads
+    try:
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 3. Extract JSON object/array substring if extra prose surrounds it
+    match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+    if match:
+        extracted = match.group(1).strip()
+        try:
+            return json.loads(extracted)
+        except (json.JSONDecodeError, ValueError):
+            cleaned = extracted
+
+    # 4. Remove trailing commas before } or ]
+    cleaned_fix = re.sub(r",\s*([\}\]])", r"\1", cleaned)
+    try:
+        return json.loads(cleaned_fix)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 5. Remove unprintable control characters (except \n, \r, \t)
+    cleaned_fix = "".join(ch for ch in cleaned_fix if ord(ch) >= 32 or ch in "\n\r\t")
+    try:
+        return json.loads(cleaned_fix)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Final attempt: re-raise original JSON error
+    return json.loads(cleaned)
+
+
 class GeminiClient:
     """
     Gemini API Client for affiliation string normalization using official google-genai SDK.
@@ -271,7 +319,7 @@ class GeminiClient:
                     self._inspect_headers(response.sdk_http_response.headers)
 
                 text_content = self._extract_response_text(response)
-                result_json = json.loads(text_content)
+                result_json = parse_gemini_json(text_content)
                 raw_res = result_json.get("resolutions", {})
 
                 resolutions: Dict[str, Dict[str, Any]] = {}
@@ -297,7 +345,8 @@ class GeminiClient:
                 is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str
                 is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
                 is_504 = "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower() or "timeout" in err_str.lower()
-                
+                is_json_err = isinstance(e, (json.JSONDecodeError, ValueError)) or "JSONDecodeError" in err_str or "Expecting property name" in err_str or "Expecting value" in err_str or r"Invalid \escape" in err_str
+
                 retry_secs = None
                 match = re.search(r"Please retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
                 if match:
@@ -306,10 +355,12 @@ class GeminiClient:
                     except ValueError:
                         pass
 
-                if is_504 and len(raw_strings) > 10:
+                # If request timed out (504) or returned unparseable JSON, split the batch in half!
+                if (is_504 or is_json_err) and len(raw_strings) > 1:
                     mid = len(raw_strings) // 2
+                    reason = "timed out (504)" if is_504 else "returned malformed JSON"
                     logger.warning(
-                        f"Gemini API normalization timed out (504/Deadline Exceeded) on batch of {len(raw_strings)} strings. "
+                        f"Gemini API normalization {reason} on batch of {len(raw_strings)} strings. "
                         f"Splitting batch into sub-batches of {mid} and {len(raw_strings) - mid} strings."
                     )
                     res1 = self.normalize_batch(raw_strings[:mid], canonical_registry_summary=canonical_registry_summary, max_retries=max_retries)
@@ -318,6 +369,12 @@ class GeminiClient:
                     combined.update(res1)
                     combined.update(res2)
                     return combined
+
+                # If a single string produced unparseable JSON, fall back gracefully to a self-resolution
+                if is_json_err and len(raw_strings) == 1:
+                    single_raw = raw_strings[0]
+                    logger.warning(f"Gemini API returned unparseable JSON for single string '{single_raw}'. Resolving as fallback self-entry.")
+                    return {single_raw: {"canonical_name": single_raw, "entity_type": "UNI"}}
 
                 if is_429:
                     if retry_secs is not None:
@@ -439,7 +496,7 @@ class GeminiClient:
                     self._inspect_headers(response.sdk_http_response.headers)
 
                 text_content = self._extract_response_text(response)
-                res_json = json.loads(text_content)
+                res_json = parse_gemini_json(text_content)
                 
                 raw_ids = res_json.get("selected_source_ids") or res_json.get("selected_source_id") or []
                 if isinstance(raw_ids, str):

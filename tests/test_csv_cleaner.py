@@ -97,26 +97,42 @@ class TestCSVCleaner(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
-        # Mock Gemini Step 1 response
+        # Mock Gemini 2-Pass responses
         mock_gemini = MagicMock()
         mock_gemini.api_key = "dummy_key"
         mock_gemini.rate_limiter = MagicMock()
-        
-        step1_response_json = {
+
+        pass1_json = {
+            "problematic_names": [
+                "Department of Electrical Engineering",
+                "UNKNOWN",
+                "MIT CSAIL",
+                "MIT Media Labs"
+            ]
+        }
+
+        pass2_json = {
             "prune_ids": ["UNKNOWN-001", "UNKNOWN-002"],
-            "requested_parent_names": ["MIT"],
             "merges": [
                 {
                     "target_parent_name": "MIT",
                     "source_ids": ["UNI-00002-MITCAM", "UNI-00099-MITMED"]
                 }
-            ]
+            ],
+            "type_fixes": {}
         }
 
-        mock_gemini._extract_response_text.return_value = json.dumps(step1_response_json)
-        mock_gemini.client.models.generate_content.return_value = MagicMock()
+        def side_effect(model, contents, config):
+            prompt_text = contents[0] if isinstance(contents, list) else ""
+            mock_resp = MagicMock()
+            if "triage assistant" in prompt_text:
+                mock_resp.text = json.dumps(pass1_json)
+            else:
+                mock_resp.text = json.dumps(pass2_json)
+            return mock_resp
 
-
+        mock_gemini._extract_response_text.side_effect = lambda resp: resp.text
+        mock_gemini.client.models.generate_content.side_effect = side_effect
 
         # Record modification time of registry file before cleaning
         reg_mtime_before = self.reg_path.stat().st_mtime
@@ -138,7 +154,6 @@ class TestCSVCleaner(unittest.TestCase):
             reader = list(csv.DictReader(f))
             self.assertEqual(len(reader), 2)  # MIT combined, Stanford kept, department & UNKNOWN pruned
 
-            # Rows sorted by total descending (both total=20, check entries)
             names = {r["canonical_name"] for r in reader}
             self.assertIn("Stanford University", names)
             self.assertIn("Massachusetts Institute of Technology", names)
@@ -159,4 +174,3 @@ class TestCSVCleaner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

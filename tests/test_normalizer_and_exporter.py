@@ -197,7 +197,61 @@ class TestNormalizerAndExporter(unittest.TestCase):
 
 
 
+    def test_parse_gemini_json(self):
+        from src.normalizer.gemini_client import parse_gemini_json
+
+        # Test 1: Clean JSON
+        res1 = parse_gemini_json('{"resolutions": {"Stanford": "UNI-00001"}}')
+        self.assertEqual(res1["resolutions"]["Stanford"], "UNI-00001")
+
+        # Test 2: Markdown fence wrapped
+        res2 = parse_gemini_json('```json\n{"resolutions": {"MIT": "UNI-00002"}}\n```')
+        self.assertEqual(res2["resolutions"]["MIT"], "UNI-00002")
+
+        # Test 3: Trailing comma before closing brace
+        res3 = parse_gemini_json('{"resolutions": {"Google": "COM-00001",}}')
+        self.assertEqual(res3["resolutions"]["Google"], "COM-00001")
+
+        # Test 4: Extra prose surrounding JSON block
+        res4 = parse_gemini_json('Here is the JSON response:\n{"resolutions": {"Meta": "COM-00002"}}\nHope this helps!')
+        self.assertEqual(res4["resolutions"]["Meta"], "COM-00002")
+
+    def test_gemini_client_normalize_batch_json_error_split(self):
+        from unittest.mock import MagicMock
+        from src.normalizer.gemini_client import GeminiClient
+
+        client = GeminiClient(api_key="dummy_key_for_testing")
+        client._client = MagicMock()
+
+        raw_strings = [f"Affiliation_{i}" for i in range(10)]
+
+        def side_effect(model, contents, config):
+            payload_str = contents[1]
+            if "Affiliation_0" in payload_str and "Affiliation_9" in payload_str:
+                # Return unparseable malformed JSON for full 10-string batch
+                mock_resp = MagicMock()
+                mock_resp.text = '{"resolutions": {"Affiliation_0": "UNI-0001", invalid_json_here}}'
+                return mock_resp
+            # Sub-batch 1
+            if "Affiliation_0" in payload_str:
+                mock_resp = MagicMock()
+                mock_resp.text = json.dumps({"resolutions": {f"Affiliation_{i}": f"UNI-0000{i}" for i in range(5)}})
+                return mock_resp
+            # Sub-batch 2
+            mock_resp = MagicMock()
+            mock_resp.text = json.dumps({"resolutions": {f"Affiliation_{i}": f"UNI-0000{i}" for i in range(5, 10)}})
+            return mock_resp
+
+        client.client.models.generate_content.side_effect = side_effect
+        resolutions = client.normalize_batch(raw_strings)
+
+        self.assertEqual(len(resolutions), 10)
+        self.assertEqual(resolutions["Affiliation_0"]["canonical_id"], "UNI-00000")
+        self.assertEqual(resolutions["Affiliation_9"]["canonical_id"], "UNI-00009")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -5,55 +5,68 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.config import CLEANED_OUTPUT_DATA_DIR, DEFAULT_GEMINI_MODEL, OUTPUT_DATA_DIR
-from src.normalizer.gemini_client import GeminiClient
+from src.normalizer.gemini_client import GeminiClient, parse_gemini_json
 from src.registry.organization_registry import OrganizationRegistry
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT_STEP1_ANALYSIS = """You are an expert academic metadata and institution entity cleaning assistant.
-Your task is to analyze a CSV matrix of academic paper affiliation counts across years and decide:
-1. Which rows should be PRUNED (useless, unidentifiable, or standalone department names without parent organization).
-2. Which rows should be MERGED/COMBINED (sub-entities, department variants, lab branches into their parent organization).
+SYSTEM_PROMPT_PASS1_TRIAGE = """You are an expert academic metadata triage assistant.
+Your task is to review a list of raw institution names and identify ALL entries that have potential data quality issues:
+1. DUPLICATES / VARIANTS: Multiple entries referring to the same parent institution (e.g., 'Google Brain' & 'Google LLC', 'MIT CSAIL' & 'MIT').
+2. ONES TO BE PRUNED: Standalone department/faculty names lacking parent institutions (e.g., 'Department of Computer Science', 'Faculty of Engineering') or generic noise ('UNKNOWN', 'N/A', 'Independent Researcher').
+3. MIX-UPS / HIERARCHY ISSUES: Entries with potential system vs campus confusion (e.g., 'University of California' vs 'University of California, San Diego') or miscategorized entities.
 
-RULES:
-1. PRUNE:
-   - Identify standalone department/faculty names that lack a parent institution (e.g., 'Department of Electrical Engineering', 'Department of Computer Science', 'Faculty of Science', 'Dept of CS').
-   - Identify generic, invalid, or meaningless rows like 'UNKNOWN', 'N/A', 'Unknown Organization', 'Independent Researcher', 'Various Institutions'.
+INSTRUCTIONS:
+Return ONLY a valid JSON object containing a list of problematic name strings from the input:
+{
+  "problematic_names": [
+    "Department of Computer Science",
+    "Google Brain",
+    "University of California"
+  ]
+}
+"""
 
-2. MERGE / COMBINE:
-   - Group sub-entities, research labs, or department variants into their proper parent canonical institution name.
-   - For example: 'MIT CSAIL', 'MIT Media Labs', and 'Massachusetts Institute of Technology' MUST be grouped together, and you should request the parent institution name 'MIT'.
-   - For example: 'Stanford AI Lab', 'Stanford CS', 'Stanford Vision Lab' -> group together and request parent name 'Stanford University'.
+SYSTEM_PROMPT_PASS2_DEEP_ANALYSIS = """You are an expert academic metadata cleaning assistant.
+You will be provided with a list of problematic institutional entries along with their current canonical_id, canonical_name, entity_type, and known merged aliases.
 
-3. PRESERVE DISTINCT VALID ENTITIES:
-   - Keep distinct university campuses separate (e.g., 'University of California, Berkeley' vs 'University of California, Los Angeles').
-   - Keep distinct independent research labs separate (e.g., 'Max Planck Institute...', 'CNRS', 'NASA JPL').
+INSTITUTIONAL HIERARCHY RULES:
+1. UNIVERSITIES:
+   - Distinct campuses remain distinct entities (e.g., 'University of California, Los Angeles' vs. 'University of California, San Diego'). Campuses are NOT rolled up into parent university systems.
+2. COMPANIES:
+   - Global, regional, or departmental subsidiaries aggregate into a single parent entity (e.g., Google India, Google Brain, Google Zurich -> 'Google LLC'; FAIR -> 'Meta Platforms, Inc.').
+3. LABS & GOVERNMENT AGENCIES:
+   - Independent research institutes and national labs remain distinct entities (e.g., Max Planck Institutes, NASA Jet Propulsion Laboratory, CNRS).
+
+INSTRUCTIONS:
+Analyze the problematic entries and determine the cleaning actions:
+1. PRUNING: Identify entries to prune (standalone department names without parent institution, generic noise like 'UNKNOWN', 'N/A').
+2. MERGING: Group sub-entities, department variants, or corporate subsidiaries under their official parent canonical institution name.
+3. CATEGORIZATION FIXES: Correct any miscategorized entity types (entity_type must be one of ['UNI', 'COM', 'LAB', 'GOV']). E.g. if an academic university was wrongly marked 'GOV' or 'COM', correct it to 'UNI'.
 
 OUTPUT FORMAT:
 Return ONLY a valid JSON object:
 {
-  "prune_ids": ["ROW_ID_1", "ROW_ID_2"],
-  "requested_parent_names": ["MIT", "Stanford University"],
+  "prune_ids": ["ROW_ID_OR_NAME_1"],
   "merges": [
     {
-      "target_parent_name": "MIT",
-      "source_ids": ["UNI-00002-MITCAM", "UNI-00099-MITMED"]
-    },
-    {
-      "target_parent_name": "Stanford University",
-      "source_ids": ["UNI-00001-STANFD", "UNI-00055-STANLAB"]
+      "target_parent_name": "Official Parent Organization Name",
+      "source_ids": ["ROW_ID_OR_NAME_A", "ROW_ID_OR_NAME_B"]
     }
-  ]
+  ],
+  "type_fixes": {
+    "ROW_ID_OR_NAME_X": "UNI"
+  }
 }
 """
 
 
 class CSVCleaner:
     """
-    Independent tool to clean exported matrix CSV files using a hybrid Gemini LLM + Python workflow:
-    - Step 1: Query Gemini LLM with row names to identify prunes & request parent merge names (e.g. "MIT").
-    - Step 2: Look up specific requested parent names locally in OrganizationRegistry (read-only).
-    - Step 3: Deterministically merge/prune rows and aggregate yearly paper counts in Python (fast & fail-proof).
+    Independent tool to clean exported matrix CSV files using a 2-pass Gemini LLM + Python workflow:
+    - Pass 1 (Triage): Send plain list of institution names (no codes, no JSON) to Gemini to identify problematic entries (duplicates, prunes, mix-ups).
+    - Pass 2 (Deep Analysis): Send rich context for identified problematic entries (canonical IDs, names, entity types, and known aliases) to Gemini along with institutional hierarchy rules to get recommended actions (prunes, merges, entity_type fixes).
+    - Pass 3 (Python Execution): Deterministically merge/prune rows, fix categorization, and aggregate paper counts in Python.
     - Saves cleaned CSV files to data/cleaned_output/ (never overwrites data/output/).
     - Leaves canonical organization registry COMPLETELY UNTOUCHED.
     """
@@ -75,52 +88,100 @@ class CSVCleaner:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _query_step1_chunk(
-        self, chunk: List[Dict[str, Any]], config: Any
-    ) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
-        """Queries Gemini LLM for Step 1 analysis with adaptive sub-chunking on timeout."""
-        if not chunk:
-            return [], [], []
+    def _query_pass1_chunk(
+        self, name_chunk: List[str], config: Any
+    ) -> List[str]:
+        """Pass 1: Queries Gemini with plain list of institution names to identify problematic entries."""
+        if not name_chunk:
+            return []
 
-        payload_step1 = {"matrix_rows": chunk}
-        contents_step1 = [
-            SYSTEM_PROMPT_STEP1_ANALYSIS,
-            f"INPUT PAYLOAD:\n{json.dumps(payload_step1, separators=(',', ':'), ensure_ascii=False)}",
+        formatted_list = "\n".join(f"- {name}" for name in name_chunk)
+        contents_pass1 = [
+            SYSTEM_PROMPT_PASS1_TRIAGE,
+            f"RAW INSTITUTION NAMES:\n{formatted_list}",
         ]
 
         self.gemini_client.rate_limiter.acquire()
         try:
-            response_step1 = self.gemini_client.client.models.generate_content(
+            response_pass1 = self.gemini_client.client.models.generate_content(
                 model=self.gemini_client.model,
-                contents=contents_step1,
+                contents=contents_pass1,
                 config=config,
             )
-            text_step1 = self.gemini_client._extract_response_text(response_step1)
-            step1_json = json.loads(text_step1)
+            text_pass1 = self.gemini_client._extract_response_text(response_pass1)
+            pass1_json = parse_gemini_json(text_pass1)
+            prob_names = pass1_json.get("problematic_names", [])
+            return prob_names if isinstance(prob_names, list) else []
+        except Exception as e:
+            err_str = str(e)
+            is_timeout = "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower() or "timeout" in err_str.lower()
+            is_json_err = isinstance(e, (json.JSONDecodeError, ValueError)) or "JSONDecodeError" in err_str or "Expecting property name" in err_str or "Expecting value" in err_str
 
-            p_ids = step1_json.get("prune_ids", [])
-            p_names = step1_json.get("requested_parent_names", [])
-            m_groups = step1_json.get("merges", [])
+            if (is_timeout or is_json_err) and len(name_chunk) > 30:
+                mid = len(name_chunk) // 2
+                reason = "timed out (504)" if is_timeout else "returned malformed JSON"
+                logger.warning(
+                    f"Pass 1 triage {reason} on chunk of {len(name_chunk)} names. "
+                    f"Splitting into sub-chunks of {mid} and {len(name_chunk) - mid} names."
+                )
+                p1 = self._query_pass1_chunk(name_chunk[:mid], config)
+                p2 = self._query_pass1_chunk(name_chunk[mid:], config)
+                return p1 + p2
+            logger.warning(f"Error querying Gemini LLM for Pass 1 triage chunk of {len(name_chunk)} names: {e}")
+            return []
+
+    def _query_pass2_deep_analysis(
+        self, problematic_entries: List[Dict[str, Any]], config: Any
+    ) -> Tuple[List[str], List[Dict[str, Any]], Dict[str, str]]:
+        """Pass 2: Queries Gemini with rich context (aliases, IDs, entity types) & rules for deep analysis."""
+        if not problematic_entries:
+            return [], [], {}
+
+        payload_pass2 = {"problematic_entries": problematic_entries}
+        contents_pass2 = [
+            SYSTEM_PROMPT_PASS2_DEEP_ANALYSIS,
+            f"INPUT PAYLOAD:\n{json.dumps(payload_pass2, separators=(',', ':'), ensure_ascii=False)}",
+        ]
+
+        self.gemini_client.rate_limiter.acquire()
+        try:
+            response_pass2 = self.gemini_client.client.models.generate_content(
+                model=self.gemini_client.model,
+                contents=contents_pass2,
+                config=config,
+            )
+            text_pass2 = self.gemini_client._extract_response_text(response_pass2)
+            pass2_json = parse_gemini_json(text_pass2)
+
+            p_ids = pass2_json.get("prune_ids", [])
+            m_groups = pass2_json.get("merges", [])
+            t_fixes = pass2_json.get("type_fixes", {})
 
             return (
                 p_ids if isinstance(p_ids, list) else [],
-                p_names if isinstance(p_names, list) else [],
                 m_groups if isinstance(m_groups, list) else [],
+                t_fixes if isinstance(t_fixes, dict) else {},
             )
         except Exception as e:
             err_str = str(e)
             is_timeout = "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower() or "timeout" in err_str.lower()
-            if is_timeout and len(chunk) > 25:
-                mid = len(chunk) // 2
+            is_json_err = isinstance(e, (json.JSONDecodeError, ValueError)) or "JSONDecodeError" in err_str or "Expecting property name" in err_str or "Expecting value" in err_str
+
+            if (is_timeout or is_json_err) and len(problematic_entries) > 15:
+                mid = len(problematic_entries) // 2
+                reason = "timed out (504)" if is_timeout else "returned malformed JSON"
                 logger.warning(
-                    f"Step 1 query timed out (504/Deadline Exceeded) on chunk of {len(chunk)} rows. "
-                    f"Splitting into sub-chunks of {mid} and {len(chunk) - mid} rows."
+                    f"Pass 2 analysis {reason} on chunk of {len(problematic_entries)} entries. "
+                    f"Splitting into sub-chunks of {mid} and {len(problematic_entries) - mid} entries."
                 )
-                p1, n1, m1 = self._query_step1_chunk(chunk[:mid], config)
-                p2, n2, m2 = self._query_step1_chunk(chunk[mid:], config)
-                return p1 + p2, n1 + n2, m1 + m2
-            logger.warning(f"Error querying Gemini LLM for cleaning chunk of {len(chunk)} rows: {e}")
-            return [], [], []
+                p1, m1, t1 = self._query_pass2_deep_analysis(problematic_entries[:mid], config)
+                p2, m2, t2 = self._query_pass2_deep_analysis(problematic_entries[mid:], config)
+                combined_t = {}
+                combined_t.update(t1)
+                combined_t.update(t2)
+                return p1 + p2, m1 + m2, combined_t
+            logger.warning(f"Error querying Gemini LLM for Pass 2 analysis of {len(problematic_entries)} entries: {e}")
+            return [], [], {}
 
     def clean_file(
         self,
@@ -128,11 +189,10 @@ class CSVCleaner:
         output_csv_path: Optional[Path] = None,
     ) -> Path:
         """
-        Cleans a matrix CSV file:
-        1. Query Gemini LLM to get prune_ids and requested_parent_names (e.g. "MIT").
-        2. Look up requested_parent_names locally in OrganizationRegistry to obtain canonical entity IDs & names.
-        3. Deterministically aggregate paper counts and output cleaned CSV in Python.
-        - Canonical registry is NOT modified.
+        Cleans a matrix CSV file using a 2-pass workflow:
+        1. Pass 1: Send plain institution names to Gemini to triage problematic entries.
+        2. Pass 2: Enrich problematic entries with aliases & entity types; query Gemini with hierarchy rules.
+        3. Pass 3: Deterministically aggregate paper counts, prune rows, and fix entity types in Python.
         """
         input_path = Path(input_csv_path)
         if not input_path.exists():
@@ -172,18 +232,6 @@ class CSVCleaner:
                 writer.writerows(rows)
             return output_path
 
-        # Format CSV rows compactly for Gemini (NO counts or full canonical list sent)
-        compact_rows = []
-        for r in rows:
-            c_id = r.get("canonical_id", "")
-            c_name = r.get("canonical_name", "")
-            e_type = r.get("entity_type", "")
-            compact_rows.append({
-                "canonical_id": c_id,
-                "canonical_name": c_name,
-                "entity_type": e_type,
-            })
-
         from google.genai import types
         config = types.GenerateContentConfig(
             temperature=0.0,
@@ -191,33 +239,71 @@ class CSVCleaner:
             should_return_http_response=True,
         )
 
-        # STEP 1: Query Gemini to analyze CSV in chunks of max 100 rows to prevent 504 Gateway Timeouts
-        chunk_size = 100
-        row_chunks = [compact_rows[i : i + chunk_size] for i in range(0, len(compact_rows), chunk_size)]
+        # PASS 1: Lightweight Triage - Send ONLY plain list of institution names
+        raw_names = [r.get("canonical_name", "").strip() for r in rows if r.get("canonical_name", "").strip()]
+        name_chunk_size = 150
+        name_chunks = [raw_names[i : i + name_chunk_size] for i in range(0, len(raw_names), name_chunk_size)]
+
+        all_problematic_names: Set[str] = set()
+        logger.info(f"Pass 1: Querying Gemini LLM with {len(raw_names)} plain names across {len(name_chunks)} chunk(s) for triage...")
+
+        for idx, chunk in enumerate(name_chunks, 1):
+            logger.info(f"Pass 1 (Chunk {idx}/{len(name_chunks)}): Triaging {len(chunk)} plain institution names...")
+            prob = self._query_pass1_chunk(chunk, config)
+            for p in prob:
+                if str(p).strip():
+                    all_problematic_names.add(str(p).strip().lower())
+
+        logger.info(f"Pass 1 Complete: Identified {len(all_problematic_names)} potential problematic name entries.")
+
+        # Filter original rows to build rich context for ONLY problematic entries
+        problematic_rows: List[Dict[str, Any]] = []
+        problematic_entries_payload: List[Dict[str, Any]] = []
+
+        for r in rows:
+            c_id = (r.get("canonical_id") or "").strip()
+            c_name = (r.get("canonical_name") or "").strip()
+            e_type = (r.get("entity_type") or "UNI").strip()
+
+            if c_name.lower() in all_problematic_names or c_id.lower() in all_problematic_names:
+                problematic_rows.append(r)
+                # Lookup known aliases from OrganizationRegistry
+                aliases = []
+                if c_id:
+                    reg_entry = self.registry._lookup_map.get(c_id.upper()) or self.registry.find_by_string(c_id)
+                    if reg_entry:
+                        aliases = reg_entry.get("known_aliases", [])
+
+                problematic_entries_payload.append({
+                    "canonical_id": c_id,
+                    "canonical_name": c_name,
+                    "entity_type": e_type,
+                    "known_aliases": aliases,
+                })
+
+        # PASS 2: Targeted Deep Analysis - Send enriched problematic entries + Hierarchy Rules to Gemini
+        entry_chunk_size = 80
+        entry_chunks = [problematic_entries_payload[i : i + entry_chunk_size] for i in range(0, len(problematic_entries_payload), entry_chunk_size)]
 
         all_prune_ids: List[str] = []
-        all_requested_parent_names: List[str] = []
         all_merges: List[Dict[str, Any]] = []
+        all_type_fixes: Dict[str, str] = {}
 
-        logger.info(f"Step 1: Querying Gemini LLM for {len(rows)} matrix rows across {len(row_chunks)} chunk(s) (max {chunk_size} rows/chunk)...")
+        logger.info(f"Pass 2: Performing deep analysis on {len(problematic_entries_payload)} problematic entries with aliases & rules...")
 
-        for idx, chunk in enumerate(row_chunks, 1):
-            logger.info(f"Step 1 (Chunk {idx}/{len(row_chunks)}): Querying Gemini LLM with {len(chunk)} matrix row headers...")
-            p_ids, p_names, m_groups = self._query_step1_chunk(chunk, config)
+        for idx, chunk in enumerate(entry_chunks, 1):
+            logger.info(f"Pass 2 (Chunk {idx}/{len(entry_chunks)}): Deep analyzing {len(chunk)} entries...")
+            p_ids, m_groups, t_fixes = self._query_pass2_deep_analysis(chunk, config)
             all_prune_ids.extend(p_ids)
-            all_requested_parent_names.extend(p_names)
             all_merges.extend(m_groups)
+            all_type_fixes.update(t_fixes)
 
-        prune_ids: List[str] = all_prune_ids
-        requested_parent_names: List[str] = list(set(all_requested_parent_names))
-        merges: List[Dict[str, Any]] = all_merges
+        prune_set: Set[str] = {str(pid).strip().lower() for pid in all_prune_ids if pid}
 
-        prune_set: Set[str] = {str(pid).strip().lower() for pid in prune_ids if pid}
-
-        # STEP 2: Look up requested parent names in local OrganizationRegistry to obtain canonical metadata
+        # PASS 3: Local Registry Target Mapping & Deterministic Python Execution
         source_id_to_target: Dict[str, Tuple[str, str, str]] = {}
 
-        for m in merges:
+        for m in all_merges:
             if not isinstance(m, dict):
                 continue
             parent_name = (m.get("target_parent_name") or "").strip()
@@ -241,16 +327,25 @@ class CSVCleaner:
                 if sid_clean:
                     source_id_to_target[sid_clean] = target_tuple
 
-            logger.info(f"Step 2: Mapped merge parent '{parent_name}' -> Canonical: {c_id} ({c_name}) for {len(sources)} source IDs")
+            logger.info(f"Pass 3: Mapped merge parent '{parent_name}' -> Canonical: {c_id} ({c_name}) for {len(sources)} source IDs")
 
-        # STEP 3: Deterministically aggregate and prune in Python
+        # Deterministically aggregate, prune, and apply entity_type fixes in Python
         cleaned_map: Dict[Tuple[str, str, str], Dict[str, int]] = {}
         unmerged_rows: List[Dict[str, Any]] = []
+
+        # Prepare normalized type fixes map (lowercased key -> new_type)
+        type_fixes_map: Dict[str, str] = {str(k).strip().lower(): str(v).strip().upper() for k, v in all_type_fixes.items()}
 
         for r in rows:
             raw_id = (r.get("canonical_id") or "").strip()
             raw_name = (r.get("canonical_name") or "").strip()
             raw_type = (r.get("entity_type") or "UNI").strip()
+
+            # Apply categorization fix if specified
+            if raw_id.lower() in type_fixes_map:
+                raw_type = type_fixes_map[raw_id.lower()]
+            elif raw_name.lower() in type_fixes_map:
+                raw_type = type_fixes_map[raw_name.lower()]
 
             # Check if row should be pruned
             if raw_id.lower() in prune_set or raw_name.lower() in prune_set:
@@ -261,14 +356,25 @@ class CSVCleaner:
             target_key = source_id_to_target.get(raw_id.lower()) or source_id_to_target.get(raw_name.lower())
 
             if target_key:
-                if target_key not in cleaned_map:
-                    cleaned_map[target_key] = {y: 0 for y in year_fields}
+                c_id, c_name, c_type = target_key
+                # Override type if fix requested for parent key
+                if c_id.lower() in type_fixes_map:
+                    c_type = type_fixes_map[c_id.lower()]
+                elif c_name.lower() in type_fixes_map:
+                    c_type = type_fixes_map[c_name.lower()]
+                
+                final_key = (c_id, c_name, c_type)
+
+                if final_key not in cleaned_map:
+                    cleaned_map[final_key] = {y: 0 for y in year_fields}
 
                 for y in year_fields:
                     val = r.get(y, 0)
-                    cleaned_map[target_key][y] += int(val) if str(val).isdigit() else 0
+                    cleaned_map[final_key][y] += int(val) if str(val).isdigit() else 0
             else:
-                unmerged_rows.append(r)
+                row_copy = dict(r)
+                row_copy["entity_type"] = raw_type
+                unmerged_rows.append(row_copy)
 
         # Re-construct merged output rows
         final_output_rows: List[Dict[str, Any]] = []

@@ -42,7 +42,9 @@ A modular, extensible Python toolkit and CLI application to extract, deduplicate
   * Maps raw author affiliation strings extracted from paper metadata to existing canonical organization IDs in `data/canonical_organizations.json` or proposes new canonical entries (official name and entity type: `UNI`, `COM`, `LAB`, `GOV`).
   * Enforces institutional hierarchy rules (preserving distinct university campuses, rolling up corporate subsidiaries, keeping national labs distinct).
 * **Matrix CSV Post-Cleaning** (`CSVCleaner`):
-  * Analyzes row headers in exported CSV matrices during post-cleaning (`python3 main.py clean`) to identify standalone unidentifiable/department rows to prune (e.g. "Department of Electrical Engineering", "UNKNOWN") and sub-entities/variants to merge into parent canonical organizations (e.g. merging "MIT CSAIL" into "Massachusetts Institute of Technology").
+  * Executes a 2-pass cleaning protocol during post-cleaning (`python3 main.py clean`):
+    * **Pass 1 (Lightweight Triage)**: Sends plain lists of raw institution names (no codes, no JSON, no metadata) to Gemini to identify entries with potential issues (duplicates, prunes, mix-ups).
+    * **Pass 2 (Targeted Deep Analysis)**: For identified problematic entries only, prepares rich context payloads containing canonical IDs, names, entity types, and all known merged aliases. Sends these payloads to Gemini along with explicit **Institutional Hierarchy Rules** to obtain recommended cleaning actions (pruning, parent entity merges, and entity type categorization fixes like converting wrongly marked `GOV` entities to `UNI`).
 
 > [!WARNING]
 > **AI-Generated / AI-Assisted Data Disclaimer**
