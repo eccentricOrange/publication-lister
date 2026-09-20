@@ -238,8 +238,11 @@ python3 main.py batch --verbose
 Clean raw matrix CSVs (prune standalone departments, merge sub-entities into parent organizations):
 
 ```bash
-# Clean all exported matrix CSVs in data/output/ into data/cleaned_output/
+# Clean all active matrix CSVs in data/output/ into data/cleaned_output/ (obeys batch.yaml if present)
 python3 main.py clean --all
+
+# Specify a custom batch configuration file
+python3 main.py clean --all --config path/to/my_batch.yaml
 
 # Clean a specific CSV file
 python3 main.py clean --input data/output/ICRA_affiliations_2017_2026.csv

@@ -212,6 +212,33 @@ class TestCSVCleaner(unittest.TestCase):
         self.assertEqual(res_forced, output_csv)
         self.assertFalse(ckpt_file.exists())  # Checkpoint file deleted after successful run
 
+    def test_clean_all_obeys_batch_yaml(self):
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        icra_csv = self.out_dir / "ICRA_affiliations_2023_2024.csv"
+        iros_csv = self.out_dir / "IROS_affiliations_2023_2024.csv"
+
+        headers = ["canonical_id", "canonical_name", "entity_type", "2023", "total"]
+        row = {"canonical_id": "UNI-00001-STANFD", "canonical_name": "Stanford", "entity_type": "UNI", "2023": "1", "total": "1"}
+
+        for p in [icra_csv, iros_csv]:
+            with open(p, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=headers)
+                w.writeheader()
+                w.writerow(row)
+
+        custom_yaml = self.root_path / "batch.yaml"
+        custom_yaml.write_text("venues:\n  - ICRA\nyears: [2023, 2024]\n")
+
+        mock_gemini = MagicMock()
+        mock_gemini.api_key = None  # Will copy file without calling Gemini
+
+        cleaner = CSVCleaner(registry=self.registry, gemini_client=mock_gemini, output_dir=self.cleaned_dir)
+        cleaned_paths = cleaner.clean_all(input_dir=self.out_dir, config_path=custom_yaml)
+
+        cleaned_names = [p.name for p in cleaned_paths]
+        self.assertIn("ICRA_affiliations_2023_2024.csv", cleaned_names)
+        self.assertNotIn("IROS_affiliations_2023_2024.csv", cleaned_names)
+
 
 if __name__ == "__main__":
     unittest.main()

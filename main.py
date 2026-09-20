@@ -125,6 +125,8 @@ def run_clean(args: argparse.Namespace) -> None:
     start_year = getattr(args, "year_start", None)
     end_year = getattr(args, "year_end", None)
     force = getattr(args, "force", False)
+    config_val = getattr(args, "config", None)
+    config_path = Path(config_val) if config_val else None
     model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
 
     logger.info(f"Executing CLEAN subcommand with model={model}")
@@ -134,11 +136,11 @@ def run_clean(args: argparse.Namespace) -> None:
         in_p = Path(input_val)
         out_p = Path(output_val) if output_val else None
         if in_p.is_dir():
-            cleaner.clean_all(input_dir=in_p, output_dir=out_p, force=force)
+            cleaner.clean_all(input_dir=in_p, output_dir=out_p, force=force, config_path=config_path)
         else:
             cleaner.clean_file(in_p, output_csv_path=out_p, force=force)
     elif clean_all_flag or (not venue and not start_year):
-        cleaner.clean_all(force=force)
+        cleaner.clean_all(force=force, config_path=config_path)
     elif venue and start_year and end_year:
         from src.utils import sanitize_venue_name
         clean_venue = sanitize_venue_name(venue)
@@ -230,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--year-end", type=int, default=None, help="End publication year (optional)")
     p_clean.add_argument("--all", action="store_true", help="Clean all CSV matrix files in output directory")
     p_clean.add_argument("--force", action="store_true", help="Force re-cleaning ignoring existing cleaned files and checkpoints")
+    p_clean.add_argument("--config", "-c", type=str, default=None, help="Path to batch.yaml configuration file (defaults to batch.yaml if present)")
     p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 

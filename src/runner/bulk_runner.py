@@ -324,7 +324,7 @@ class BulkRunner:
         """Phase 4: Cleans exported matrix CSVs with Gemini LLM into data/cleaned_output/."""
         logger.info("=== Phase 4: Bulk Matrix Cleaning ===")
         cleaner = CSVCleaner(registry=self.registry, gemini_client=self.gemini_client)
-        cleaned_files = cleaner.clean_all(input_dir=self.exporter.output_dir, force=force)
+        cleaned_files = cleaner.clean_all(input_dir=self.exporter.output_dir, force=force, batch_config=self.config)
         logger.info(f"Phase 4 Complete: Cleaned {len(cleaned_files)} CSV matrix files into {cleaner.output_dir}.")
         return cleaned_files
 

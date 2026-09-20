@@ -486,11 +486,38 @@ class CSVCleaner:
         input_dir: Path = OUTPUT_DATA_DIR,
         output_dir: Optional[Path] = None,
         force: bool = False,
+        batch_config: Optional[Any] = None,
+        config_path: Optional[Path] = None,
     ) -> List[Path]:
-        """Cleans all CSV matrix files in input_dir and saves them to output_dir."""
+        """Cleans all CSV matrix files in input_dir (obeying batch.yaml if present) and saves them to output_dir."""
         in_dir = Path(input_dir)
         out_dir = Path(output_dir) if output_dir else self.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        eff_config = batch_config
+        target_config_name = config_path.name if config_path else "batch.yaml"
+        if not eff_config:
+            target_config = config_path if config_path else Path("batch.yaml")
+            if target_config.exists():
+                try:
+                    from src.runner.batch_config import BatchConfig
+                    eff_config = BatchConfig.from_file(target_config)
+                    target_config_name = target_config.name
+                    logger.info(f"Obeying batch configuration from {target_config.resolve()} for CSV cleaning ({len(eff_config.venues)} active venues)")
+                except Exception as e:
+                    logger.warning(f"Could not load batch configuration from {target_config}: {e}")
+
+        allowed_venues: Optional[Set[str]] = None
+        if eff_config:
+            from src.utils import sanitize_venue_name
+            allowed_venues = set()
+            for v_cfg in eff_config.venue_configs:
+                allowed_venues.add(v_cfg.short_name.upper())
+                if isinstance(v_cfg.search_term, str):
+                    allowed_venues.add(sanitize_venue_name(v_cfg.search_term).upper())
+                elif isinstance(v_cfg.search_term, list):
+                    for st in v_cfg.search_term:
+                        allowed_venues.add(sanitize_venue_name(st).upper())
 
         cleaned_paths: List[Path] = []
         csv_files = sorted(list(in_dir.glob("*.csv")))
@@ -498,7 +525,16 @@ class CSVCleaner:
             logger.info(f"No CSV files found in {in_dir} to clean.")
             return []
 
+        import re
         for csv_file in csv_files:
+            m = re.match(r"^([A-Za-z0-9_\-]+)_affiliations_(\d{4})_(\d{4})\.csv$", csv_file.name)
+            if m:
+                v_code = m.group(1).upper()
+                from src.utils import sanitize_venue_name
+                if allowed_venues is not None and v_code not in allowed_venues and sanitize_venue_name(v_code).upper() not in allowed_venues:
+                    logger.info(f"Excluding CSV file '{csv_file.name}' from cleaning (venue '{v_code}' not active in {target_config_name}).")
+                    continue
+
             target_out = out_dir / csv_file.name
             cleaned_path = self.clean_file(csv_file, output_csv_path=target_out, force=force)
             cleaned_paths.append(cleaned_path)
