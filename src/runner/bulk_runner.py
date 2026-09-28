@@ -97,7 +97,13 @@ class BulkRunner:
                     )
                 elif source == "scopus":
                     extractor = ScopusExtractor()
-                    extractor.extract(venue, year, force=force)
+                    extractor.extract(
+                        venue,
+                        year,
+                        force=force,
+                        search_term=overrides.get("search_term"),
+                        query_term=overrides.get("query_term"),
+                    )
                 else:
                     err_msg = f"Unsupported extraction source '{source}' for {venue} {year}"
                     logger.error(err_msg)
