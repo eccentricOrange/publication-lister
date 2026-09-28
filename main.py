@@ -10,6 +10,7 @@ from src.extractors.openalex import OpenAlexExtractor
 from src.extractors.scopus import ScopusExtractor
 from src.logger import setup_logging
 from src.normalizer.affiliation_normalizer import AffiliationNormalizer
+from src.normalizer.gemini_client import GeminiClient
 from src.registry.organization_registry import OrganizationRegistry
 from src.runner.batch_config import BatchConfig
 from src.runner.bulk_runner import BulkRunner
@@ -164,6 +165,16 @@ def run_build_visualisation(args: argparse.Namespace) -> None:
     logger.info("Visualisation dataset manifest built successfully.")
 
 
+def run_clean_registry(args: argparse.Namespace) -> None:
+    use_gemini = getattr(args, "gemini", False) or getattr(args, "use_gemini", False)
+    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    logger.info(f"Executing CLEAN-REGISTRY subcommand (use_gemini={use_gemini}, model={model})...")
+    registry = OrganizationRegistry()
+    gemini_client = GeminiClient(model=model) if use_gemini else None
+    stats = registry.clean_registry(gemini_client=gemini_client, use_gemini=use_gemini)
+    logger.info(f"Canonical organization registry cleaned successfully: {stats}")
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Executing FULL PIPELINE flow...")
     run_extract(args)
@@ -269,6 +280,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_vis.add_argument("--config", "-c", type=str, default=None, help="Path to batch.yaml configuration file (defaults to batch.yaml if present)")
     p_vis.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
+    # 8. Clean Registry subcommand
+    p_clean_reg = subparsers.add_parser("clean-registry", aliases=["clean-reg", "clean_registry"], help="Clean, deduplicate, and standardize canonical organization registry (Local + Gemini LLM)")
+    p_clean_reg.add_argument("--gemini", "--use-gemini", action="store_true", help="Enable Gemini LLM audit pass during registry cleanup")
+    p_clean_reg.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_clean_reg.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
+
     return parser
 
 
@@ -295,6 +312,8 @@ def cli() -> None:
             run_batch(args)
         elif args.subcommand in ("build-visualisation", "visualize", "build-vis"):
             run_build_visualisation(args)
+        elif args.subcommand in ("clean-registry", "clean-reg", "clean_registry"):
+            run_clean_registry(args)
     except Exception as e:
         logger.error(f"Execution failed on subcommand '{args.subcommand}'", exc_info=True)
         sys.exit(1)

@@ -120,6 +120,8 @@ class BulkRunner:
         Resolves strings globally in a single cumulative pass against OrganizationRegistry & Gemini LLM.
         """
         logger.info("=== Phase 2: Global Pooled Normalization ===")
+        logger.info("Running pre-normalization canonical registry cleanup...")
+        self.registry.clean_registry()
 
         # 1. Collect all raw datasets and unique strings
         venue_year_raw_data: Dict[Tuple[str, int], Dict[str, Any]] = {}
@@ -338,6 +340,8 @@ class BulkRunner:
         """Executes full 4-phase bulk pipeline: Extraction -> Global Normalization -> Export -> Cleaning."""
         logger.info(f"Starting Bulk Pipeline across {len(self.config.venues)} venues and years {min(self.config.years)}..{max(self.config.years)}")
         self.run_bulk_extraction(force=force)
+        logger.info("=== Pre-Phase 2: Cleaning Canonical Registry ===")
+        self.registry.clean_registry()
         self.run_global_normalization(force=force)
         exported = self.run_bulk_export()
         cleaned = self.run_bulk_clean(exported, force=force, refine=refine, max_passes=max_passes)

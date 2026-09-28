@@ -19,9 +19,10 @@ GEMINI_MODEL = DEFAULT_GEMINI_MODEL
 SYSTEM_PROMPT = """You are an expert institutional entity normalization assistant for academic papers.
 Your task is to map raw author affiliation strings to canonical organizations based on strict rules:
 
-1. UNIVERSITY CAMPUS RULE:
-   - Preserve distinct university campuses as separate entities.
-   - Example: 'University of California, Los Angeles' and 'University of California, San Diego' MUST NOT be rolled up into 'University of California'. Keep them as distinct entities.
+1. UNIVERSITY CAMPUS RULE & LAB MERGING:
+   - Preserve distinct university campuses as separate entities (e.g., 'University of California, Berkeley', 'University of California, Los Angeles', 'University of California, San Diego' MUST NOT be rolled up into 'University of California').
+   - Internal university departments, faculties, labs, and centers (e.g., 'UCLA Vision Lab', 'MIT CSAIL', 'CMU Robotics Institute', 'Berkeley AI Research', 'AUTOLAB') MUST be merged into their parent university campus entity and assigned entity_type 'UNI'.
+   - DO NOT create standalone organizations for generic department names without parent universities (e.g. 'Department of Computer Science', 'Faculty of Engineering'). If a parent university is present in the text, map to that parent university.
 
 2. CORPORATE ROLLUP RULE:
    - Aggregate all regional, functional, or subsidiary corporate entities into a single parent entity.
@@ -29,7 +30,8 @@ Your task is to map raw author affiliation strings to canonical organizations ba
    - Example: 'FAIR', 'Facebook AI Research' -> 'Meta Platforms, Inc.'.
 
 3. LABS & GOVERNMENT AGENCIES RULE:
-   - Keep independent research labs and government agencies distinct (e.g., 'Max Planck Institute for Intelligent Systems', 'NASA Jet Propulsion Laboratory', 'CNRS').
+   - Truly independent research institutes, national labs, and government agencies remain distinct entities with entity_type 'LAB' or 'GOV' (e.g., 'Max Planck Institute for Intelligent Systems', 'NASA Jet Propulsion Laboratory', 'CNRS', 'Inria', 'Ames National Laboratory').
+   - Specific Max Planck Institutes (e.g. 'Max Planck Institute for Intelligent Systems', 'Max Planck Institute for Software Systems') remain distinct LAB entities. Generic 'Max Planck Institute' without location/field maps to 'Max Planck Society'.
 
 REGISTRY FORMAT:
 Provided existing canonical organizations are listed in pipe-delimited format:
@@ -37,7 +39,7 @@ CANONICAL_ID|CANONICAL_NAME|ENTITY_TYPE|KNOWN_ALIASES
 
 INSTRUCTIONS:
 For each raw affiliation string in the input list:
-- If it matches an existing canonical organization, map it directly to its 'canonical_id' string.
+- If it matches an existing canonical organization in the summary, map it directly to its 'canonical_id' string.
 - If NO existing organization fits, map it to a new object with 'canonical_name' and 'entity_type' (one of ['UNI', 'COM', 'LAB', 'GOV']).
 
 OUTPUT FORMAT:
@@ -553,4 +555,85 @@ class GeminiClient:
         )
         s_ids = res.get("source_ids", [])
         return s_ids[0] if s_ids else None
+
+    def audit_registry_candidates(
+        self,
+        candidate_entries: List[Dict[str, Any]],
+        max_retries: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Uses Gemini LLM to audit a batch of canonical registry candidate entries.
+        Identifies:
+        1. Duplicate entries that should be merged (source_id -> target_id).
+        2. Misclassified entity_types (e.g. university lab marked as 'LAB' -> should be 'UNI').
+        """
+        if not candidate_entries or not self.api_key:
+            return {"merges": [], "reclassifications": []}
+
+        system_prompt = (
+            "You are an expert academic organization registry auditor.\n"
+            "Review the provided list of canonical organization records (canonical_id, canonical_name, entity_type, known_aliases):\n"
+            "Identify:\n"
+            "1. DUPLICATE MERGES: If entry A is a duplicate/alias/sub-department of entry B, specify that entry A should be merged into entry B.\n"
+            "   - Return: 'merges': [{'source_id': 'ID_A', 'target_id': 'ID_B', 'reason': '...'}]\n"
+            "2. ENTITY TYPE CORRECTIONS: If a university lab, department, or center is categorized as 'LAB', change it to 'UNI'. Truncated or generic corporate labs remain 'COM'. Independent national labs or gov agencies remain 'LAB' or 'GOV'.\n"
+            "   - Return: 'reclassifications': [{'canonical_id': 'ID_X', 'entity_type': 'UNI', 'reason': '...'}]\n\n"
+            "STRICT RULES:\n"
+            "- Distinct university campuses (e.g. UC Berkeley, UCLA, UC San Diego, UC Davis) MUST remain separate 'UNI' entities.\n"
+            "- Specific Max Planck Institutes (e.g. Max Planck Institute for Intelligent Systems, Max Planck Institute for Software Systems) MUST remain separate 'LAB' entities.\n"
+            "- Return ONLY valid JSON format:\n"
+            '{\n  "merges": [{"source_id": "...", "target_id": "...", "reason": "..."}],\n'
+            '  "reclassifications": [{"canonical_id": "...", "entity_type": "UNI", "reason": "..."}]\n}'
+        )
+
+        candidates_summary = [
+            {
+                "canonical_id": e.get("canonical_id"),
+                "canonical_name": e.get("canonical_name"),
+                "entity_type": e.get("entity_type"),
+                "known_aliases": e.get("known_aliases", []),
+            }
+            for e in candidate_entries
+        ]
+
+        contents = [
+            system_prompt,
+            f"CANONICAL ENTRIES TO AUDIT:\n{json.dumps(candidates_summary, separators=(',', ':'), ensure_ascii=False)}",
+        ]
+
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            should_return_http_response=True,
+        )
+
+        for attempt in range(max_retries):
+            self.rate_limiter.acquire()
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=config,
+                )
+                if response.sdk_http_response and hasattr(response.sdk_http_response, "headers"):
+                    self._inspect_headers(response.sdk_http_response.headers)
+
+                text_content = self._extract_response_text(response)
+                res_json = parse_gemini_json(text_content)
+                merges = res_json.get("merges", [])
+                reclass = res_json.get("reclassifications", [])
+                logger.info(f"Gemini audited {len(candidate_entries)} registry entries: found {len(merges)} merges, {len(reclass)} reclassifications.")
+                return {"merges": merges, "reclassifications": reclass}
+            except Exception as e:
+                err_str = str(e)
+                is_503 = (isinstance(e, errors.APIError) and e.code == 503) or "503" in err_str or "UNAVAILABLE" in err_str or "Service Unavailable" in err_str
+                sleep_time = min(30.0, (2 ** attempt) * 2.0 + random.uniform(1.0, 2.0))
+                if is_503:
+                    logger.warning(f"Gemini registry audit API 503 Service Unavailable ({e}). Sleeping {sleep_time:.2f}s before retry")
+                else:
+                    logger.warning(f"Gemini registry audit attempt {attempt+1}/{max_retries} failed ({e}). Sleeping {sleep_time:.2f}s")
+                if attempt < max_retries - 1:
+                    time.sleep(sleep_time)
+
+        return {"merges": [], "reclassifications": []}
 

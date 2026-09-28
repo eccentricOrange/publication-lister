@@ -59,6 +59,9 @@ class AffiliationNormalizer:
         venue_upper = venue.upper()
         norm_path = self.get_normalized_file_path(venue_upper, year)
 
+        # Ensure canonical organization registry is cleaned and deduplicated before normalization
+        self.registry.clean_registry()
+
         # Check if fully completed normalized dataset exists
         cached_resolved_mappings: Dict[str, str] = {}
         if not force and norm_path.exists() and norm_path.stat().st_size > 0:
