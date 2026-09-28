@@ -3,7 +3,7 @@ import logging
 import sys
 from pathlib import Path
 
-from src.config import DEFAULT_GEMINI_MODEL
+from src.config import DEFAULT_GEMINI_MODEL, resolve_gemini_model
 from src.extractors.conference_schedule import ConferenceScheduleExtractor
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.openalex import OpenAlexExtractor
@@ -26,7 +26,7 @@ def run_extract(args: argparse.Namespace) -> None:
     end_year = args.year_end
     source = args.source.lower()
     force = args.force
-    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    model = resolve_gemini_model(cli_model=getattr(args, "model", None))
 
     logger.info(f"Executing EXTRACT subcommand for venue={venue}, years={start_year}..{end_year}, source={source}, model={model}")
 
@@ -48,7 +48,6 @@ def run_extract(args: argparse.Namespace) -> None:
             extractor.extract(venue, year, force=force)
         elif source == "all":
             extracted = False
-            # 1. Try OpenAlex first (free, open, high rate limit)
             try:
                 extractor = OpenAlexExtractor(model=model)
                 extractor.extract(venue, year, force=force)
@@ -56,7 +55,6 @@ def run_extract(args: argparse.Namespace) -> None:
             except Exception as e:
                 logger.warning(f"OpenAlex extraction failed for {venue} {year}: {e}. Trying IEEE Xplore...")
 
-            # 2. Try IEEE Xplore
             if not extracted:
                 try:
                     extractor = IEEEExtractor()
@@ -65,7 +63,6 @@ def run_extract(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logger.warning(f"IEEE extraction failed for {venue} {year}: {e}. Trying Scopus...")
 
-            # 3. Try Scopus
             if not extracted:
                 try:
                     extractor = ScopusExtractor()
@@ -74,7 +71,6 @@ def run_extract(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logger.warning(f"Scopus extraction failed for {venue} {year}: {e}. Trying schedule parser...")
 
-            # 4. Try Schedule Parser
             if not extracted and (args.schedule_file or args.schedule_url):
                 extractor = ConferenceScheduleExtractor(
                     schedule_url=args.schedule_url,
@@ -92,7 +88,7 @@ def run_normalize(args: argparse.Namespace) -> None:
     start_year = args.year_start
     end_year = args.year_end
     force = args.force
-    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    model = resolve_gemini_model(cli_model=getattr(args, "model", None))
 
     logger.info(f"Executing NORMALIZE subcommand for venue={venue}, years={start_year}..{end_year}, model={model}")
 
@@ -130,7 +126,7 @@ def run_clean(args: argparse.Namespace) -> None:
     max_passes = getattr(args, "max_passes", 3)
     config_val = getattr(args, "config", None)
     config_path = Path(config_val) if config_val else None
-    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    model = resolve_gemini_model(cli_model=getattr(args, "model", None), config_path=config_path)
 
     logger.info(f"Executing CLEAN subcommand with model={model}")
     cleaner = CSVCleaner(model=model)
@@ -167,7 +163,7 @@ def run_build_visualisation(args: argparse.Namespace) -> None:
 
 def run_clean_registry(args: argparse.Namespace) -> None:
     use_gemini = getattr(args, "gemini", False) or getattr(args, "use_gemini", False)
-    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    model = resolve_gemini_model(cli_model=getattr(args, "model", None))
     logger.info(f"Executing CLEAN-REGISTRY subcommand (use_gemini={use_gemini}, model={model})...")
     registry = OrganizationRegistry()
     gemini_client = GeminiClient(model=model) if use_gemini else None
@@ -191,10 +187,10 @@ def run_batch(args: argparse.Namespace) -> None:
     force = getattr(args, "force", False)
     refine = getattr(args, "refine", False)
     max_passes = getattr(args, "max_passes", 3)
-    model = getattr(args, "model", DEFAULT_GEMINI_MODEL)
+    config = BatchConfig.from_file(config_path)
+    model = resolve_gemini_model(cli_model=getattr(args, "model", None), batch_config=config)
 
     logger.info(f"Executing BATCH subcommand with YAML config: {config_path.resolve()}, model={model}")
-    config = BatchConfig.from_file(config_path)
     runner = BulkRunner(config=config, model=model)
     runner.run_all(force=force, refine=refine, max_passes=max_passes)
     if getattr(args, "build_visualisation", False):
@@ -208,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Academic Conference & Journal Affiliation Tracker",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
-    parser.add_argument("--model", "-m", type=str, default=DEFAULT_GEMINI_MODEL, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    parser.add_argument("--model", "-m", type=str, default=None, help="Gemini LLM model name (defaults to YAML setting or hardcoded default)")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Subcommands")
 
@@ -217,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--venue", "-v_name", type=str, required=True, help="Venue name (e.g., ICRA, IROS, CVPR)")
         subparser.add_argument("--year-start", type=int, required=True, help="Start publication year (e.g., 2017)")
         subparser.add_argument("--year-end", type=int, required=True, help="End publication year (e.g., 2026)")
-        subparser.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+        subparser.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help="Gemini LLM model name (defaults to YAML setting or hardcoded default)")
         subparser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 1. Extract subcommand
@@ -250,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--refine", "-r", action="store_true", help="Refine existing cleaned matrix CSV files as starting point for recursive cleaning")
     p_clean.add_argument("--max-passes", type=int, default=3, help="Maximum recursive cleaning passes (defaults to 3)")
     p_clean.add_argument("--config", "-c", type=str, default=None, help="Path to batch.yaml configuration file (defaults to batch.yaml if present)")
-    p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_clean.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help="Gemini LLM model name (defaults to YAML setting or hardcoded default)")
     p_clean.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     # 5. Pipeline subcommand
@@ -271,7 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--force", action="store_true", help="Force re-run of all bulk extraction and normalization steps")
     p_batch.add_argument("--refine", "-r", action="store_true", help="Refine existing cleaned matrix CSV files during bulk cleaning pass")
     p_batch.add_argument("--max-passes", type=int, default=3, help="Maximum recursive cleaning passes (defaults to 3)")
-    p_batch.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_batch.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help="Gemini LLM model name (defaults to YAML setting or hardcoded default)")
     p_batch.add_argument("--build-visualisation", "--build-vis", action="store_true", help="Automatically generate visualization JSON manifest after batch completion")
     p_batch.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
@@ -283,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 8. Clean Registry subcommand
     p_clean_reg = subparsers.add_parser("clean-registry", aliases=["clean-reg", "clean_registry"], help="Clean, deduplicate, and standardize canonical organization registry (Local + Gemini LLM)")
     p_clean_reg.add_argument("--gemini", "--use-gemini", action="store_true", help="Enable Gemini LLM audit pass during registry cleanup")
-    p_clean_reg.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help=f"Gemini LLM model name (defaults to '{DEFAULT_GEMINI_MODEL}')")
+    p_clean_reg.add_argument("--model", "-m", type=str, default=argparse.SUPPRESS, help="Gemini LLM model name (defaults to YAML setting or hardcoded default)")
     p_clean_reg.add_argument("--verbose", "-v", action="store_true", help="Enable verbose DEBUG logging")
 
     return parser

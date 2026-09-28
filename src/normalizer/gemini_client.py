@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import errors, types
 
-from src.config import DEFAULT_GEMINI_MODEL, GEMINI_API_KEY
+from src.config import DEFAULT_GEMINI_MODEL, GEMINI_API_KEY, resolve_gemini_model
 from src.normalizer.rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -114,11 +114,11 @@ class GeminiClient:
     def __init__(
         self,
         api_key: str = GEMINI_API_KEY,
-        model: str = DEFAULT_GEMINI_MODEL,
+        model: Optional[str] = None,
         rate_limiter: Optional[TokenBucketRateLimiter] = None,
     ):
         self.api_key = api_key
-        self.model = model or DEFAULT_GEMINI_MODEL
+        self.model = resolve_gemini_model(cli_model=model)
         self.rate_limiter = rate_limiter or TokenBucketRateLimiter(requests_per_minute=6.0, tokens_per_minute=250000.0)
         self.initial_rate_queried = False
         self._client: Optional[genai.Client] = None

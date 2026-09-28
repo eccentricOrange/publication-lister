@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.cleaner.csv_cleaner import CSVCleaner
-from src.config import DEFAULT_GEMINI_MODEL, NORMALIZED_DATA_DIR, RAW_DATA_DIR
+from src.config import DEFAULT_GEMINI_MODEL, NORMALIZED_DATA_DIR, RAW_DATA_DIR, resolve_gemini_model
 from src.exporters.matrix_exporter import MatrixExporter
 from src.extractors.ieee_xplore import IEEEExtractor
 from src.extractors.openalex import OpenAlexExtractor
@@ -38,7 +38,7 @@ class BulkRunner:
     ):
         self.config = config
         self.registry = registry or OrganizationRegistry()
-        eff_model = model or config.model or DEFAULT_GEMINI_MODEL
+        eff_model = resolve_gemini_model(cli_model=model, batch_config=config)
         if gemini_client:
             self.gemini_client = gemini_client
             if eff_model:

@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from src.config import CLEANED_OUTPUT_DATA_DIR, DEFAULT_GEMINI_MODEL, OUTPUT_DATA_DIR
+from src.config import CLEANED_OUTPUT_DATA_DIR, DEFAULT_GEMINI_MODEL, OUTPUT_DATA_DIR, resolve_gemini_model
 from src.normalizer.gemini_client import GeminiClient, parse_gemini_json
 from src.registry.organization_registry import OrganizationRegistry
 
@@ -91,10 +91,11 @@ class CSVCleaner:
         self.registry = registry or OrganizationRegistry()
         if gemini_client:
             self.gemini_client = gemini_client
-            if model:
-                self.gemini_client.model = model
+            if model and str(model).strip():
+                self.gemini_client.model = resolve_gemini_model(cli_model=model)
         else:
-            self.gemini_client = GeminiClient(model=model or DEFAULT_GEMINI_MODEL)
+            eff_model = resolve_gemini_model(cli_model=model)
+            self.gemini_client = GeminiClient(model=eff_model)
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 # Base Directory of the Project
@@ -30,4 +31,37 @@ NORMALIZED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CLEANED_OUTPUT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_gemini_model(
+    cli_model: Optional[str] = None,
+    config_path: Optional[Path] = None,
+    batch_config: Optional[Any] = None,
+) -> str:
+    """
+    Resolves the Gemini model string according to strict 3-step priority order:
+    1. CLI flag (--model / -m) if explicitly provided and non-empty.
+    2. YAML configuration file model setting (from batch_config or batch.yaml file).
+    3. Hardcoded default (DEFAULT_GEMINI_MODEL from config / env).
+    """
+    if cli_model and str(cli_model).strip():
+        return str(cli_model).strip()
+
+    if batch_config and getattr(batch_config, "model", None):
+        return str(batch_config.model).strip()
+
+    target_yaml = config_path or (BASE_DIR / "batch.yaml")
+    if target_yaml and Path(target_yaml).exists():
+        try:
+            import yaml
+            with open(target_yaml, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+                m = data.get("model")
+                if m and str(m).strip():
+                    return str(m).strip()
+        except Exception:
+            pass
+
+    return DEFAULT_GEMINI_MODEL
+
 
